@@ -58,7 +58,7 @@ def get_levels(m, n):
             
     return list(reversed(levels))
 
-def plot_single_term_contours(axis, d, term, n=[.5, .7, .9], smooth=10, edge=1/4):
+def plot_single_term_contours(axis, d, term, n=[.05, .25, .5], smooth=10, edge=1/4):
     m = counts_to_grid_matrix(d)
     if term == 'green':
         term = '#5DFC0A'

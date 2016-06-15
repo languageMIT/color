@@ -31,6 +31,12 @@ TSIMANE_COLORS = c("black", "white", "red", "blue", "green", "yellow",
 ENGLISH_COLORS = c("black", "white", "red", "blue", "green", "yellow",
                    "grey", "purple / violet", "orange", "brown", "pink", "celeste")
 
+TSIMANE_SUBJECTS_UNDER_18 = c(8, 15, 21, 25, 58, 59, 1509)
+
+get_mode <- function(x) {
+  ux <- unique(x)
+  ux[which.max(tabulate(match(x, ux)))]
+}
 
 
 # Load data -------------------------------
@@ -140,6 +146,25 @@ m = read.csv("Munsell_WCS_codes.csv") %>%
          MunsellCode=OtHer.code,
 	 WCSCode=WCS)
 
+
+# Read demographics --------------------------------------------
+
+%demo2014 = read.csv("demographics2014.csv", stringsAsFactors=F) %>% mutate(Year=2014)
+%demo2015 = read.csv("demographics2015.csv", stringsAsFactors=F) %>% mutate(Year=2015)
+%demo2015 %>%
+%  rename(Subject=Subject..) %>%
+%  mutate(year=2015) %>%
+%  select(Subject, Age, Sex, Spanish, Year) %>%
+%  rbind(demo2014 %>% select(Subject, Age, Sex, Spanish, Year)) -> ts_demo
+%
+%ColorData %>%
+%  separate(Experiment, into=c("Language", "Task"), sep="_") %>%
+%  filter(Language == "Tsimane'") %>%
+%  rename(Subject=subject) %>%
+%  mutate(Subject=as.character(Subject)) %>%
+%  inner_join(ts_demo) -> ColorDataWithDemographics
+%  
+
 # Compute conditional entropy ----------------------------------
 
 P_ChipGivenWord <- plyr::ddply(ColorData,c("Experiment","color"),function(x){return(as.data.frame(prop.table(table(x$grid_location))))})
@@ -167,7 +192,7 @@ ChipEntropies <- ChipEntropies %>% mutate(Probability=1/ChipNo, ExpEnt=Entropy*P
 
 LanguageEntropies <- ChipEntropies %>%
   group_by(Experiment) %>%
-  summarise(Uncertainty=sum(ExpEnt))
+  summarise(Uncertainty=sum(ExpEnt)) 
 
 write.csv(ChipEntropies, "output/Latest_ChipEntropies.csv")
 
@@ -176,7 +201,92 @@ ChipEntropies <- ChipEntropies %>%
   mutate(RowColumn=CodeToRowColumn(grid_location)) %>%
   separate(RowColumn, into=c("Row", "Column"), sep="_") %>%
   mutate(Row=as.numeric(Row), Column=as.numeric(Column))
-  
+
+# Conditional entropy per subject----------------------
+
+
+# Spearman correlations -------------------------------
+
+en_es = cor.test(filter(ChipEntropies, Language == "English")$Entropy,
+                 filter(ChipEntropies, Language == "Spanish")$Entropy,
+          	 method='spearman')[4]$estimate
+
+en_ts = cor.test(filter(ChipEntropies, Language == "English")$Entropy,
+                 filter(ChipEntropies, Language == "Tsimane")$Entropy,
+          	 method='spearman')[4]$estimate
+
+es_ts = cor.test(filter(ChipEntropies, Language == "Spanish")$Entropy,
+                 filter(ChipEntropies, Language == "Tsimane")$Entropy,
+          	 method='spearman')[4]$estimate
+
+
+# Informativity per language --------------------------
+
+ChipEntropies %>%
+  group_by(Language, Type) %>%
+  summarise(LangEntropy=mean(Entropy)) %>%
+  write.csv("output/Latest_EntropyByLanguage.csv")
+
+
+# Modal informativity --------------------------
+
+# Suppose every chip is just named according to its modal label.
+ModalColorData = ColorData %>%
+  group_by(Experiment, grid_location) %>%
+  summarise(color=get_mode(color)) %>%
+  ungroup()
+
+
+Modal_P_ChipGivenWord <- plyr::ddply(ModalColorData,c("Experiment","color"),
+     function(x){return(as.data.frame(prop.table(table(x$grid_location))))})
+Modal_P_WordGivenChip <- plyr::ddply(ModalColorData,c("Experiment","grid_location"),
+     function(x){return(as.data.frame(prop.table(table(x$color))))})
+names(Modal_P_ChipGivenWord)<-c("Experiment","color","grid_location","Frequency")
+names(Modal_P_WordGivenChip)<-c("Experiment","grid_location","color","Frequency")
+
+# Get each chip's score
+GetModalChipScore<-function(x){
+  # Sum over all words.
+  Val=0
+  for (CurrCol in unique(x$color)){
+    ChipWord=filter(Modal_P_ChipGivenWord,
+                   color==CurrCol,
+		   grid_location==x$grid_location[1],
+		   Experiment==x$Experiment[1])$Frequency
+    WordChip=filter(Modal_P_WordGivenChip,
+                    grid_location==x$grid_location[1],
+		    color==CurrCol,
+		    Experiment==x$Experiment[1])$Frequency
+    Val=Val+WordChip*log2(1.0/ChipWord)
+  }
+  return(Val)
+}
+
+ModalChipEntropies <- plyr::ddply(ModalColorData,c("Experiment","grid_location"),GetModalChipScore)
+names(ModalChipEntropies)<-c("Experiment","grid_location","Entropy")
+ModalChipNo<-length(unique(ModalChipEntropies$grid_location))
+# This line assumes that each subdataset has the same number of chips
+ModalChipEntropies <- ModalChipEntropies %>%
+  mutate(Probability=1/ModalChipNo, ExpEnt=Entropy*Probability)
+
+write.csv(ModalChipEntropies, "output/Latest_ModalChipEntropies.csv")
+
+ModalChipEntropies <- ModalChipEntropies %>%
+  separate(Experiment, into=c("Language", "Type"), sep="_") %>%
+  mutate(RowColumn=CodeToRowColumn(grid_location)) %>%
+  separate(RowColumn, into=c("Row", "Column"), sep="_") %>%
+  mutate(Row=as.numeric(Row), Column=as.numeric(Column))
+
+ModalChipEntropies %>%
+  group_by(Language, Type) %>%
+  summarise(LangEntropy=mean(Entropy)) %>%
+  write.csv("output/Latest_ModalEntropyByLanguage.csv")
+
+
+# By-subject average surprisal ------------------------
+
+
+
 
 # Load WCS --------------------------------------------
 
@@ -307,17 +417,6 @@ ChipEntropies %>%
   rename(OurCode=grid_location) %>%
   write.csv("output/Latest_All_ChipEntropies.csv")
 
-# Correct language names ------------------------------
-
-# rename Tsimane to Tsimane'
-ChipEntropies = mutate(ChipEntropies, Language=ifelse(Language == "Tsimane", "Tsimane'", Language))
-ColorData = ColorData %>%
-  separate(Experiment, into=c("Language", "Task"), sep="_") %>%
-  mutate(Language=ifelse(Language == "Tsimane", "Tsimane'", Language)) %>%
-  unite(Experiment, Language, Task, sep="_")
-
-# correct other WCS names here if we care
-
 
 # Load focal location data ----------------------------
 
@@ -343,7 +442,7 @@ d5 %>%
 
 d = rbind(d4_choices, d5_choices) %>% filter(!is.na(term))
 
-focal_ts = d %>% mutate(Language = "Tsimane'")
+focal_ts = d %>% mutate(Language = "Tsimane")
 focal_ts = filter(focal_ts, !str_detect(term, "_")) # drop _2 colors
 
 get_en_es_focals = function(filename, lang) {
@@ -387,7 +486,7 @@ ColorData %>%
   select(subject, color, Language) %>%
   mutate(color=as.character(color)) %>%
   group_by(Language) %>%
-  mutate(color=ifelse(Language == "Tsimane'",
+  mutate(color=ifelse(Language == "Tsimane",
                       TSIMANE_COLORS[as.numeric(color)],
 		      ENGLISH_COLORS[as.numeric(color)])) %>%
   ungroup() %>%		      
@@ -411,7 +510,7 @@ ColorData %>%
 rts = read.csv("english_rts.csv") %>%
   select(-Native_speaker, -X) %>%
   mutate(Language="English") %>%
-  rbind(read.csv("tsimane_rts.csv") %>% mutate(Language="Tsimane'"))
+  rbind(read.csv("tsimane_rts.csv") %>% mutate(Language="Tsimane"))
 
 ColorData %>%
   separate(Experiment, into=c("Language", "Task"), sep="_") %>%
@@ -459,9 +558,9 @@ load("cc.rda") # Load the chip code -> hex code conversion table
 
 
 
-ts_color_indices = focal_locations[focal_locations$Language == "Tsimane'",]$term %>% as.numeric()
+ts_color_indices = focal_locations[focal_locations$Language == "Tsimane",]$term %>% as.numeric()
 ts_colors = TSIMANE_COLORS[ts_color_indices]
-focal_locations[focal_locations$Language == "Tsimane'",]$term = ts_colors
+focal_locations[focal_locations$Language == "Tsimane",]$term = ts_colors
 
 special_focal_locations = filter(focal_locations, term %in% SPECIAL_FOCAL_COLORS)
 special_focal_density = group_by(special_focal_locations, Language, Row, Column, term) %>% summarise(value=n())
@@ -624,7 +723,7 @@ d %>%
 ggsave("output/WCS_snake.pdf", width=7, height=50, limitsize=F)
 
 d %>%
-  filter(Language %in% c("English", "Spanish", "Tsimane'")) %>%
+  filter(Language %in% c("English", "Spanish", "Tsimane")) %>%
   ggplot(aes(x=score_rank,
              y=Entropy,
 	     xmin=score_rank-.5,
@@ -645,7 +744,7 @@ d %>%
 ggsave("output/snake.pdf", height=3, width=10)
 
 d_open %>%
-  filter(Language %in% c("English", "Spanish", "Tsimane'")) %>%
+  filter(Language %in% c("English", "Spanish", "Tsimane")) %>%
   ggplot(aes(x=score_rank,
              y=Entropy,
 	     xmin=score_rank-.5,
@@ -686,9 +785,9 @@ d_to_plot %>%
   theme(axis.ticks=element_blank(),
         axis.text.x=element_blank(),
 	axis.text.y = element_text(size=6,
-	   face=ifelse(levels(d_to_plot$Language) %in% c("Tsimane'", "English", "Spanish"),
+	   face=ifelse(levels(d_to_plot$Language) %in% c("Tsimane", "English", "Spanish"),
 	               "bold", "plain"),
-           color=ifelse(levels(d_to_plot$Language) %in% c("Tsimane'", "English", "Spanish"),
+           color=ifelse(levels(d_to_plot$Language) %in% c("Tsimane", "English", "Spanish"),
 	               "blue", "black")))
 
 ggsave("output/WCS_tapestry.pdf", width=7, height=8)
@@ -713,9 +812,9 @@ d_to_plot %>%
     geom_rect() +
     theme_bw() +
     theme(axis.text.y = element_text(size=6,
-	    face=ifelse(levels(d_to_plot$Language) %in% c("Tsimane'", "English", "Spanish"),
+	    face=ifelse(levels(d_to_plot$Language) %in% c("Tsimane", "English", "Spanish"),
 	                "bold", "plain"),
-            color=ifelse(levels(d_to_plot$Language) %in% c("Tsimane'", "English", "Spanish"),
+            color=ifelse(levels(d_to_plot$Language) %in% c("Tsimane", "English", "Spanish"),
 	                 "blue", "black")))
 
 ggsave("output/WCS_tornado.pdf", height=8, width=7)
@@ -734,17 +833,12 @@ only_scores %>%
     xlab("Average surprisal per chip") +
     theme_bw() +
     theme(axis.text.y = element_text(size=6,
-	    face=ifelse(levels(d_to_plot$Language) %in% c("Tsimane'", "English", "Spanish"),
+	    face=ifelse(levels(d_to_plot$Language) %in% c("Tsimane", "English", "Spanish"),
 	                "bold", "plain"),
-            color=ifelse(levels(d_to_plot$Language) %in% c("Tsimane'", "English", "Spanish"),
+            color=ifelse(levels(d_to_plot$Language) %in% c("Tsimane", "English", "Spanish"),
 	                 "blue", "black")))
 
 ggsave("output/WCS_simple_tornado.pdf", height=8.5, width=7)
-
-get_mode <- function(x) {
-  ux <- unique(x)
-  ux[which.max(tabulate(match(x, ux)))]
-}
 
 d %>%
   group_by(score_rank) %>%
@@ -777,7 +871,7 @@ blanky = theme(panel.grid.major = element_blank(),
 
 ccd = data.frame(cc) %>% mutate(grid_location=rownames(.)) %>% rename(Hex=cc)
 
-emp.foc = read.csv("empirical_focal3.csv")
+emp.foc = read.csv("empirical_focal3.csv", stringsAsFactors=F)
 names(emp.foc) = c("Language", "term", "grid_location", "Hex")
 emp.foc$term = as.character(emp.foc$term)
 
@@ -815,7 +909,7 @@ emp.foc$term = as.character(emp.foc$term)
       }
     }
 
-diamond = function(x) {
+diamond = function(x, ym=16) {
   x = rename(x, location=grid_location)
   x$color = paste(substr(x$Language, 1, 3), ": ", x$color, sep="")
   x$location = as.character(x$location)
@@ -830,17 +924,16 @@ diamond = function(x) {
   names(cols) = as.character(key$color)
   x$col = as.factor(x$col)
   x$col = factor(x$col, levels=rev(levels(x$col)))
-  x$Language = factor(x$Language, levels=c("English", "Spanish", "Tsimane'"))
+  x$Language = factor(x$Language, levels=c("English", "Spanish", "Tsimane"))
   
   ggplot(x, aes(x=row,
                 y=as.numeric(col),
 		fill=color,
 		size=(modal.pct))) +
 	geom_point(shape=23, alpha=1) +
-	scale_x_continuous(breaks=seq(1, 20)) +
 	scale_x_continuous(breaks=seq(1, 20)) + 
-	scale_fill_manual(values=cols) + 
-        scale_size_continuous(range=c(0, 16), limits=c(0, 1)) + 
+	scale_fill_manual(values=cols) +
+        scale_size_continuous(range=c(0, ym), limits=c(0, 1)) +
         theme(axis.ticks = element_line(size = 1, color="black")) +
         blanky +
 	theme(legend.position="none", 
@@ -855,12 +948,22 @@ diamond = function(x) {
   
 }
 
-diamond(filter(x.sum, Language == "English", Task == "Open")) #make them 118x140, asterisk for focal
+diamond(filter(x.sum, Language == "English", Task == "Open")) 
 ggsave("output/english_diamond.png", width=710/100 * 1.18, height=249/100 * 1.4)
 
-diamond(filter(x.sum, Language == "Spanish", Task == "Open")) #make them 118x140, asterisk for focal
+diamond(filter(x.sum, Language == "Spanish", Task == "Open")) 
 ggsave("output/spanish_diamond.png", width=710/100 * 1.18, height=249/100 * 1.4)
 
-diamond(filter(x.sum, Language == "Tsimane'", Task == "Open"))
+diamond(filter(x.sum, Language == "Tsimane", Task == "Open"))
 ggsave("output/tsimane_diamond.png", width=710/100 * 1.18, height=249/100 * 1.4)
+
+
+diamond(filter(x.sum, Language == "English", Task == "Fixed")) 
+ggsave("output/english_fixed_diamond.png", width=710/100 * 1.18, height=249/100 * 1.4)
+
+diamond(filter(x.sum, Language == "Spanish", Task == "Fixed")) 
+ggsave("output/spanish_fixed_diamond.png", width=710/100 * 1.18, height=249/100 * 1.4)
+
+diamond(filter(x.sum, Language == "Tsimane", Task == "Fixed"))
+ggsave("output/tsimane_fixed_diamond.png", width=710/100 * 1.18, height=249/100 * 1.4)
 
