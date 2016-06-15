@@ -149,21 +149,21 @@ m = read.csv("Munsell_WCS_codes.csv") %>%
 
 # Read demographics --------------------------------------------
 
-%demo2014 = read.csv("demographics2014.csv", stringsAsFactors=F) %>% mutate(Year=2014)
-%demo2015 = read.csv("demographics2015.csv", stringsAsFactors=F) %>% mutate(Year=2015)
-%demo2015 %>%
-%  rename(Subject=Subject..) %>%
-%  mutate(year=2015) %>%
-%  select(Subject, Age, Sex, Spanish, Year) %>%
-%  rbind(demo2014 %>% select(Subject, Age, Sex, Spanish, Year)) -> ts_demo
-%
-%ColorData %>%
-%  separate(Experiment, into=c("Language", "Task"), sep="_") %>%
-%  filter(Language == "Tsimane'") %>%
-%  rename(Subject=subject) %>%
-%  mutate(Subject=as.character(Subject)) %>%
-%  inner_join(ts_demo) -> ColorDataWithDemographics
-%  
+#demo2014 = read.csv("demographics2014.csv", stringsAsFactors=F) %>% mutate(Year=2014)
+#demo2015 = read.csv("demographics2015.csv", stringsAsFactors=F) %>% mutate(Year=2015)
+#demo2015 %>%
+#  rename(Subject=Subject..) %>%
+#  mutate(year=2015) %>%
+#  select(Subject, Age, Sex, Spanish, Year) %>%
+#  rbind(demo2014 %>% select(Subject, Age, Sex, Spanish, Year)) -> ts_demo
+#
+#ColorData %>%
+##  separate(Experiment, into=c("Language", "Task"), sep="_") %>%
+#  filter(Language == "Tsimane'") %>%
+#  rename(Subject=subject) %>%
+#  mutate(Subject=as.character(Subject)) %>%
+#  inner_join(ts_demo) -> ColorDataWithDemographics
+#  
 
 # Compute conditional entropy ----------------------------------
 
@@ -909,7 +909,7 @@ emp.foc$term = as.character(emp.foc$term)
       }
     }
 
-diamond = function(x, ym=16) {
+diamond = function(x, ym=15) {
   x = rename(x, location=grid_location)
   x$color = paste(substr(x$Language, 1, 3), ": ", x$color, sep="")
   x$location = as.character(x$location)
@@ -933,7 +933,8 @@ diamond = function(x, ym=16) {
 	geom_point(shape=23, alpha=1) +
 	scale_x_continuous(breaks=seq(1, 20)) + 
 	scale_fill_manual(values=cols) +
-        scale_size_continuous(range=c(0, ym), limits=c(0, 1)) +
+        #scale_size_continuous(range=c(0, ym), limits=c(0, 1)) +
+	scale_radius(range=c(0, ym)) + 
         theme(axis.ticks = element_line(size = 1, color="black")) +
         blanky +
 	theme(legend.position="none", 
