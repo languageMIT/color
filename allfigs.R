@@ -149,21 +149,21 @@ m = read.csv("Munsell_WCS_codes.csv") %>%
 
 # Read demographics --------------------------------------------
 
-#demo2014 = read.csv("demographics2014.csv", stringsAsFactors=F) %>% mutate(Year=2014)
-#demo2015 = read.csv("demographics2015.csv", stringsAsFactors=F) %>% mutate(Year=2015)
-#demo2015 %>%
-#  rename(Subject=Subject..) %>%
-#  mutate(year=2015) %>%
-#  select(Subject, Age, Sex, Spanish, Year) %>%
-#  rbind(demo2014 %>% select(Subject, Age, Sex, Spanish, Year)) -> ts_demo
-#
-#ColorData %>%
-##  separate(Experiment, into=c("Language", "Task"), sep="_") %>%
-#  filter(Language == "Tsimane'") %>%
-#  rename(Subject=subject) %>%
-#  mutate(Subject=as.character(Subject)) %>%
-#  inner_join(ts_demo) -> ColorDataWithDemographics
-#  
+demo2014 = read.csv("demographics2014.csv", stringsAsFactors=F) %>% mutate(Year=2014, Task="Open")
+demo2015 = read.csv("demographics2015.csv", stringsAsFactors=F) %>% mutate(Year=2015, Task="Fixed")
+demo2015 %>%
+  rename(Subject=Subject..) %>%
+  mutate(year=2015) %>%
+  select(Subject, Age, Sex, Spanish, Year, Task) %>%
+  rbind(demo2014 %>% select(Subject, Age, Sex, Spanish, Year, Task)) -> ts_demo
+
+ColorData %>%
+  separate(Experiment, into=c("Language", "Task"), sep="_") %>%
+  filter(Language == "Tsimane") %>%
+  rename(Subject=subject) %>%
+  mutate(Subject=as.character(Subject)) %>%
+  inner_join(ts_demo) -> ColorDataWithDemographics
+  
 
 # Compute conditional entropy ----------------------------------
 
@@ -933,38 +933,40 @@ diamond = function(x, ym=15) {
 	geom_point(shape=23, alpha=1) +
 	scale_x_continuous(breaks=seq(1, 20)) + 
 	scale_fill_manual(values=cols) +
-        #scale_size_continuous(range=c(0, ym), limits=c(0, 1)) +
-	scale_radius(range=c(0, ym)) + 
+	scale_radius(range=c(0, ym), limits=c(0, 1)) + 
         theme(axis.ticks = element_line(size = 1, color="black")) +
         blanky +
-	theme(legend.position="none", 
-              axis.text.x = element_text(color="black", size=15),
+	theme(axis.text.x = element_text(color="black", size=15),
 	      axis.text.y = element_text(color="black", size=15),
               axis.title.x = element_blank(),
 	      axis.title.y = element_blank()) + 
-        guides(fill = "none") +
+        guides(fill="none", size=guide_legend()) +
 	scale_y_continuous(limits=c(0, 9),
 	                   breaks=seq(1, 8),
 			   labels=rev(c("A", "B", "C", "D", "E", "F", "G", "H")))
   
 }
 
-diamond(filter(x.sum, Language == "English", Task == "Open")) 
-ggsave("output/english_diamond.png", width=710/100 * 1.18, height=249/100 * 1.4)
+YM = 14
+DIAMOND_WIDTH=10
+DIAMOND_HEIGHT=3
 
-diamond(filter(x.sum, Language == "Spanish", Task == "Open")) 
-ggsave("output/spanish_diamond.png", width=710/100 * 1.18, height=249/100 * 1.4)
+diamond(filter(x.sum, Language == "English", Task == "Open"), ym=YM) 
+ggsave("output/english_diamond.pdf", width=DIAMOND_WIDTH, height=DIAMOND_HEIGHT)
 
-diamond(filter(x.sum, Language == "Tsimane", Task == "Open"))
-ggsave("output/tsimane_diamond.png", width=710/100 * 1.18, height=249/100 * 1.4)
+diamond(filter(x.sum, Language == "Spanish", Task == "Open"), ym=YM) 
+ggsave("output/spanish_diamond.pdf", width=DIAMOND_WIDTH, height=DIAMOND_HEIGHT)
+
+diamond(filter(x.sum, Language == "Tsimane", Task == "Open"), ym=YM)
+ggsave("output/tsimane_diamond.pdf", width=DIAMOND_WIDTH, height=DIAMOND_HEIGHT)
 
 
-diamond(filter(x.sum, Language == "English", Task == "Fixed")) 
-ggsave("output/english_fixed_diamond.png", width=710/100 * 1.18, height=249/100 * 1.4)
+diamond(filter(x.sum, Language == "English", Task == "Fixed"), ym=YM) 
+ggsave("output/english_fixed_diamond.pdf", width=DIAMOND_WIDTH, height=DIAMOND_HEIGHT)
 
-diamond(filter(x.sum, Language == "Spanish", Task == "Fixed")) 
-ggsave("output/spanish_fixed_diamond.png", width=710/100 * 1.18, height=249/100 * 1.4)
+diamond(filter(x.sum, Language == "Spanish", Task == "Fixed"), ym=YM) 
+ggsave("output/spanish_fixed_diamond.pdf", width=DIAMOND_WIDTH, height=DIAMOND_HEIGHT)
 
-diamond(filter(x.sum, Language == "Tsimane", Task == "Fixed"))
-ggsave("output/tsimane_fixed_diamond.png", width=710/100 * 1.18, height=249/100 * 1.4)
+diamond(filter(x.sum, Language == "Tsimane", Task == "Fixed"), ym=YM)
+ggsave("output/tsimane_fixed_diamond.pdf", width=DIAMOND_WIDTH, height=DIAMOND_HEIGHT)
 
