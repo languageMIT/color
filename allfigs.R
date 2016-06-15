@@ -196,6 +196,18 @@ LanguageEntropies <- ChipEntropies %>%
 
 write.csv(ChipEntropies, "output/Latest_ChipEntropies.csv")
 
+ChipEntropies %>%
+  select(-ExpEnt, -Probability) %>%
+  group_by(Experiment) %>%
+  arrange(Entropy) %>%
+  mutate(X=1:n()) %>%
+  ungroup() %>%
+  select(-Entropy) %>%
+  spread(Experiment, grid_location) %>%
+  select(-X) %>%
+  select(English_Open, Spanish_Open, Tsimane_Open, English_Fixed, Spanish_Fixed, Tsimane_Fixed) %>%
+  write.csv("output/Latest_ChipsRankOrdered.csv")
+
 ChipEntropies <- ChipEntropies %>%
   separate(Experiment, into=c("Language", "Type"), sep="_") %>%
   mutate(RowColumn=CodeToRowColumn(grid_location)) %>%
@@ -462,12 +474,12 @@ focal_locations = rbind(focal_ts, focal_en, focal_es)
 
 focal_locations %>%
   group_by(Language, term, Code) %>%
-  summarise(freq=length(Code)) %>%
+  summarise(freq=n()) %>%
   ungroup() %>%
-  group_by(term) %>%
+  group_by(Language, term) %>%
   mutate(Z=sum(freq)) %>%
   mutate(p=freq/Z) %>%
-  select(-freq, -Z) %>%
+  select(-freq) %>%
   write.csv("output/focal_P_ChipGivenWord.csv")
 
 write.csv(focal_locations, "output/focal_locations.csv")
@@ -690,7 +702,15 @@ d = WCS_ChipEntropies %>%
       rbind(d)
 d = rename(d, Code=grid_location)
 
-d_open = ChipEntropies %>% rename(Code=grid_location) %>% filter(Type == "Open") %>% select(-Type)
+d_open = ChipEntropies %>%
+  filter(Type == "Open") %>%
+  select(Language, grid_location, Entropy) %>%
+  rbind(WCS_ChipEntropies %>%
+        rename(Language=Experiment) %>%
+	select(Language, grid_location, Entropy)) %>%
+  rename(Code=grid_location)
+  
+  
 
 # For some reason group_by does the wrong thing in combination with rank(), so do it the bad old way...
 d$score_rank = NA
@@ -700,7 +720,8 @@ for (lang in unique(d$Language)) {
 
 d_open$score_rank = NA
 for (lang in unique(d$Language)) {
-  d_open[d_open$Language == lang,]$score_rank = rank(d_open[d_open$Language == lang,]$Entropy, ties.method=c("random"))
+  d_open[d_open$Language == lang,]$score_rank = rank(d_open[d_open$Language == lang,]$Entropy,
+                                                     ties.method=c("random"))
 }
 
 d %>%
@@ -767,7 +788,7 @@ ggsave("output/snake_open.pdf", height=3, width=10)
 
 # Tapestry plot ----------------------------------------
 
-d_to_plot = d %>%
+d_to_plot = d_open %>%
   mutate(Language=factor(Language)) %>%
   group_by(Language) %>%
   mutate(lang_score=sum(Entropy), min_score=min(Entropy), max_score=max(Entropy)) %>%
@@ -840,7 +861,7 @@ only_scores %>%
 
 ggsave("output/WCS_simple_tornado.pdf", height=8.5, width=7)
 
-d %>%
+d_open %>%
   group_by(score_rank) %>%
   summarise(Code=get_mode(Code)) %>%
   mutate(y=1) %>%
