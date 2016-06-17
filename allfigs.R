@@ -11,6 +11,8 @@ library(dplyr)
 library(tidyr)
 library(stringr)
 library(hexbin)
+library(Hmisc)
+library(lme4)
 
 # todo analysis using only the modal term for each chip
 # spearman correlatios of average surprisal across en es ts
@@ -19,7 +21,7 @@ library(hexbin)
 
 # We've determined the Julian-style data contains duplicated subjects so we should
 # use the Kyle-style data. (Meeting on 2016-06-02.)
-LABELLING_DATA = "Kyle"  # "Julian" or "Kyle"
+LABELLING_DATA = "Kyle"  # "Julian", "Kyle", or "Richard"
 
 SPECIAL_FOCAL_COLORS = c("blue", "green", "red", "yellow")
 
@@ -30,8 +32,6 @@ TSIMANE_COLORS = c("black", "white", "red", "blue", "green", "yellow",
 
 ENGLISH_COLORS = c("black", "white", "red", "blue", "green", "yellow",
                    "grey", "purple / violet", "orange", "brown", "pink", "celeste")
-
-TSIMANE_SUBJECTS_UNDER_18 = c(8, 15, 21, 25, 58, 59, 1509)
 
 get_mode <- function(x) {
   ux <- unique(x)
@@ -138,6 +138,16 @@ ColorData<-filter(ColorData,grid_location %in% sparse_chips_to_use)
    unite(Experiment, Language, Task) %>%
    filter(grid_location %in% sparse_chips_to_use)
 
+} else if (LABELLING_DATA == "Richard") {
+
+ load("sparse_chips_to_use.rda")
+
+ ColorData = read.csv("colorlabeling.csv") %>%
+   rename(grid_location=location) %>%
+   filter(!Toss) %>%
+   select(subject, color, Language, Task, grid_location) %>%
+   unite(Experiment, Language, Task) %>%
+   filter(grid_location %in% sparse_chips_to_use) 
 }
 
 
@@ -154,8 +164,8 @@ demo2015 = read.csv("demographics2015.csv", stringsAsFactors=F) %>% mutate(Year=
 demo2015 %>%
   rename(Subject=Subject..) %>%
   mutate(year=2015) %>%
-  select(Subject, Age, Sex, Spanish, Year, Task) %>%
-  rbind(demo2014 %>% select(Subject, Age, Sex, Spanish, Year, Task)) -> ts_demo
+  select(Subject, Age, Sex, Spanish, Year, Task, Education) %>%
+  rbind(demo2014 %>% select(Subject, Age, Sex, Spanish, Year, Task, Education)) -> ts_demo
 
 ColorData %>%
   separate(Experiment, into=c("Language", "Task"), sep="_") %>%
@@ -432,8 +442,8 @@ ChipEntropies %>%
 
 # Load focal location data ----------------------------
 
-d5 = read.csv("Tsimane2015_2_focal_colors_object_colors.csv")
-d4 = read.csv("Tsimane2014_focal_colors_object_colors.csv")
+d5 = read.csv("Tsimane2015_2_focal_colors_object_colors.csv", stringsAsFactors=F)
+d4 = read.csv("Tsimane2014_focal_colors_object_colors.csv", stringsAsFactors=F)
 
 d4 %>%
   filter(Toss == "N") %>%
@@ -441,6 +451,7 @@ d4 %>%
   select(Subject, term, Code) %>%
   filter(Code != "") %>%
   separate(term, into=c("tmp1", "tmp2", "term"), sep="_") %>%
+  mutate(year=2014) %>%
   select(-tmp1, -tmp2) -> d4_choices
 
 d5 %>%
@@ -450,12 +461,15 @@ d5 %>%
   separate(term, into=c("tmp1", "tmp2", "term", "mod"), sep="_") %>%
   filter(is.na(mod)) %>% # disregard _2 terms
   mutate(Subject = Subject.number) %>%
+  mutate(year=2015) %>%
   select(-tmp1, -tmp2, -mod, -Subject.number) -> d5_choices
 
 d = rbind(d4_choices, d5_choices) %>% filter(!is.na(term))
 
 focal_ts = d %>% mutate(Language = "Tsimane")
 focal_ts = filter(focal_ts, !str_detect(term, "_")) # drop _2 colors
+assert((focal_ts %>% select(year, Subject) %>% unique() %>% nrow()) == 99)
+focal_ts = focal_ts %>% select(-year)
 
 get_en_es_focals = function(filename, lang) {
   d = read.csv(filename) %>% select(-X) %>% mutate(Subject=subject) %>% select(-subject)
@@ -520,9 +534,19 @@ ColorData %>%
 # Numbers of subjects ---------------------------------
 
 rts = read.csv("english_rts.csv") %>%
+  filter(Native_speaker == "Y") %>%
   select(-Native_speaker, -X) %>%
   mutate(Language="English") %>%
   rbind(read.csv("tsimane_rts.csv") %>% mutate(Language="Tsimane"))
+
+sedivy = read.csv("sedivy_data_fixed.csv")
+
+sedivy %>%
+  rename(Task=Presentation_type) %>%
+  group_by(Language, Task) %>%
+  summarise(NumSubjects=length(unique(subject))) %>%
+  ungroup() ->
+  sedivy_num_subjects
 
 ColorData %>%
   separate(Experiment, into=c("Language", "Task"), sep="_") %>%
@@ -530,7 +554,6 @@ ColorData %>%
   summarise(NumSubjects=length(unique(subject))) %>%
   ungroup() ->
   labelling_num_subjects
-
 
 focal_locations %>%
   group_by(Language) %>%
@@ -546,7 +569,10 @@ rts %>%
   mutate(Task="RT") ->
   rts_num_subjects
 
-num_subjects = rbind(labelling_num_subjects, objects_num_subjects, rts_num_subjects) %>%
+num_subjects = rbind(labelling_num_subjects,
+                     objects_num_subjects,
+		     rts_num_subjects,
+		     sedivy_num_subjects) %>%
   arrange(Task, Language) 
 
 write.csv(num_subjects, "output/num_subjects.csv")
@@ -990,4 +1016,629 @@ ggsave("output/spanish_fixed_diamond.pdf", width=DIAMOND_WIDTH, height=DIAMOND_H
 
 diamond(filter(x.sum, Language == "Tsimane", Task == "Fixed"), ym=YM)
 ggsave("output/tsimane_fixed_diamond.pdf", width=DIAMOND_WIDTH, height=DIAMOND_HEIGHT)
+
+
+# Individual subject surprisal analysis ------------------------------
+
+# mostly copied in from color_analysis_kyle.Rmd
+
+e = ColorData %>%
+  separate(Experiment, into=c("Language", "Task"), sep="_") %>%
+  group_by(Language, Task, grid_location) %>%
+  mutate(location.n = n()) %>%
+  ungroup() %>%
+  group_by(Language, Task, color) %>%
+  mutate(color.n = n()) %>%
+  group_by(Language, Task, grid_location, color) %>% 
+  mutate(n=n()) %>%
+  ungroup()
+  
+e.ent = e %>%
+  group_by(Language, Task, grid_location, color, subject) %>% 
+  summarise(p.loc.given.color = first(n/color.n), 
+            p.color.given.loc = first(n/location.n),
+            inside = #p.color.given.loc * 
+            log2(1/p.loc.given.color))
+  
+  #sum up over all words
+  e.ent.loc = e.ent #summarise(group_by(ungroup(e.ent), Language, Task, subject, location), s.loc = first(inside))
+  
+  #average over all chips
+  ent = summarise(group_by(ungroup(e.ent.loc), Language, Task, subject), e=round(mean(inside), 2))
+  tsimane = filter(ent, Language == "Tsimane")
+
+  # We lose 4 subjects in this join
+  tsimane = tsimane %>%
+    rename(Subject=subject) %>%
+    mutate(Subject=as.character(Subject)) %>%
+    inner_join(ts_demo)
+    
+  ggplot(tsimane, aes(y=e, x= Spanish)) +
+    geom_point() +
+    geom_smooth(method='lm') +
+    theme_bw() +
+    xlab("Spanish knowledge") +
+    ylab("Uncertainty") +
+    xlim(0, 11)
+  ggsave("output/education_correlation.pdf", width=8 ,height=4)
+  
+  print(with(filter(tsimane, Task == "Open"), cor.test(e, Spanish, method='pearson')))
+  print(with(filter(tsimane, Task == "Fixed"), cor.test(e, Spanish, method='pearson')))
+  print(with(tsimane, cor.test(e, Spanish, method='pearson')))
+
+  m = lm(e ~ Age + Spanish + Education, data=tsimane)
+  print(summary(m))
+
+
+# Contrastive labeling -------------------------------------------------
+
+sed = sedivy
+sed$UsesColor = sed$color != "N" 
+sed$UsesAdj = sed$other_adj != "N"
+sed$same_noun = paste("same_noun: ", sed$same_noun)
+#sed = filter(sed, same_noun == "Y")
+sed.sum = group_by(sed, Language, Presentation_type, subject, same_noun) %>%
+  summarise(m.color = mean(UsesColor), m.adj = mean(UsesAdj))
+
+give.n <- function(x){
+  return(c(y = -.1, label = length(x))) 
+  # experiment with the multiplier to find the perfect position
+}
+
+sed.sum = group_by(sed.sum, Language, Presentation_type, subject, same_noun) %>% 
+  mutate(uses.something = (m.color > 0 | m.adj > 0))
+
+ggplot(sed.sum, aes(x=Language, y=m.color)) +
+  geom_jitter(alpha=1, position = position_jitter(width = .04, height=.04)) +  
+  facet_grid(same_noun ~ Presentation_type) +
+  theme_bw() +
+  stat_summary(fun.data = mean_cl_normal, geom = "errorbar", width=.01, colour="red") +
+  stat_summary(fun.y = mean, geom = "point", colour="red") +
+  ylab("proportion using color word") + 
+  stat_summary(fun.data = give.n, geom = "text", fun.y = median) +
+  ggtitle("COLOR")
+#ggsave("sedivy_colors.pdf")
+
+ggplot(filter(sed.sum, uses.something == TRUE), aes(x=Language, y=m.color)) +
+  geom_jitter(alpha=1, position = position_jitter(width = .04, height=.04)) +  
+  facet_grid(same_noun ~ Presentation_type) +
+  theme_bw() +
+  stat_summary(fun.data = mean_cl_normal, geom = "errorbar", width=.01, colour="red") +
+  stat_summary(fun.y = mean, geom = "point", colour="red") +
+  ylab("proportion using color word") + 
+  stat_summary(fun.data = give.n, geom = "text", fun.y = median) +
+  ggtitle("COLOR")
+#ggsave("sedivy_colors_uses_something.pdf")
+
+ggplot(sed.sum, aes(x=Language, y=m.adj)) +
+  geom_jitter(alpha=1, position = position_jitter(width = .04, height=.04)) +  
+  facet_grid(same_noun ~ Presentation_type) +
+  theme_bw() +
+  stat_summary(fun.data = mean_cl_normal, geom = "errorbar", width=.01, colour="red") +
+  stat_summary(fun.y = mean, geom = "point", colour="red") +
+  ylab("proportion using non-color adj. word") + 
+  stat_summary(fun.data = give.n, geom = "text", fun.y = median) +
+  ggtitle("OTHER ADJ.")
+#ggsave("sedivy_adj.pdf")
+
+###make all same
+sed.sum = group_by(sed, Language, Presentation_type, subject, same_noun) %>%
+  summarise(m.color = mean(UsesColor), m.adj = mean(UsesAdj))
+
+sed.sum2 = filter(ungroup(sed.sum), same_noun == "same_noun:  Y") %>%
+  select(Language, subject, Presentation_type, m.color, m.adj) %>%
+  gather(variable, value, -Language, -subject, -Presentation_type)
+sed.sum2$V = ifelse(sed.sum2$variable == "m.adj", "Other Adjectives", "Color Adjectives")
+
+ggplot(filter(sed.sum2, V == "Color Adjectives"), aes(x=Language, y=value)) +
+  geom_jitter(alpha=.5, position = position_jitter(width = .04, height=.04)) +  
+  facet_grid(Presentation_type ~ V) +
+  theme_bw() +
+  stat_summary(fun.data = mean_cl_normal, geom = "errorbar", width=.01, colour="#b20000", size=1,alpha=.7) +
+  stat_summary(fun.y = mean, geom = "point", colour="#b20000", size=3, alpha=.7) +
+  ylab("proportion using modifier") +
+  xlab("") +
+  stat_summary(fun.data = give.n, geom = "text", fun.y = median) 
+#ggsave("sedivy_color_adj.pdf", width=4, height=8)
+
+ggplot(filter(sed.sum2), aes(x=paste(Language, Presentation_type), y=value)) + 
+  geom_jitter(alpha=.5, position = position_jitter(width = .04, height=.04)) +  
+  facet_grid(. ~ V) +
+  theme_bw() +
+  stat_summary(fun.data = mean_cl_normal, geom = "errorbar", width=.01, colour="#b20000", size=1,alpha=.7) +
+  stat_summary(fun.y = mean, geom = "point", colour="#b20000", size=3, alpha=.7) +
+  ylab("proportion using modifier") +
+  xlab("") +
+  theme(axis.text.x = element_text(angle=90))
+#ggsave("sedivy_color_adj_pres.pdf", width=4, height=8)
+
+sed$object.to.be.labeled = gsub("green ", "", sed$object.to.be.labeled)
+sed$object.to.be.labeled = gsub("red ", "", sed$object.to.be.labeled)
+sed$object.to.be.labeled = gsub("pink ", "", sed$object.to.be.labeled)
+sed$object.to.be.labeled = gsub("yellow ", "", sed$object.to.be.labeled)
+sed$object.to.be.labeled = gsub("blue ", "", sed$object.to.be.labeled)
+
+sed.obj = group_by(filter(sed, same_noun != "same_noun:  N"),
+                   object.to.be.labeled,
+		   Language,
+		   Presentation_type,
+		   presentation_order) %>% summarise(m=mean(color != "N"))
+sed.obj$presentation_order = as.factor(sed.obj$presentation_order)
+#sed.obj$object.to.be.labeled = reorder(sed.obj$object.to.be.labeled, sed.obj$m)
+sed.obj$IsNat = ifelse(grepl("pepper|apple|banana|tomato",
+                       as.character(sed.obj$object.to.be.labeled)),
+		       "Artificial",
+		       "Natural")
+
+ggplot(filter(sed.obj, Presentation_type == "1 at a time"),
+       aes(x=object.to.be.labeled,
+           y=m * 100,
+	   group=paste(Language, object.to.be.labeled),
+	   color=Language,
+	   fill=paste(Language, presentation_order))) +
+	geom_line(size=2) + 
+	geom_point(size=5, shape=21) +  
+	theme(axis.text.x = element_text(angle=90, hjust=1, color="black"),
+	      axis.text.y = element_text(color="black")) +
+        ylab("proportion using color word") +
+	xlab("") +
+	theme(legend.position="none") +
+	scale_color_manual(values=c("gray", "black")) + 
+	theme(panel.grid.major = element_blank(),
+	      panel.grid.minor = element_blank(), 
+ 	      panel.background = element_blank(),
+	      axis.line = element_line(colour = "black"),
+	      axis.text.x = element_text(size=18, hjust=1, vjust=.5),
+	      axis.text.y=element_text(size=18),
+	      axis.title.y=element_text(size=18)) +
+	scale_fill_manual(values=c("white", "lightgray", "white", "black")) +
+  	scale_linetype_manual(values=c(2, 1)) +
+	ylab("Use of\n color word (%)") +
+	scale_y_continuous(breaks=seq(0, 80, 70)) +
+	facet_grid(. ~ IsNat, scales="free_x") +
+	theme(strip.background = element_blank(),
+	      strip.text.x = element_blank())
+ggsave("output/contrastive_color_word_use.pdf", width=432/100, height=511/100)
+
+##look at nat vs not
+sed$IsNat = ifelse(grepl("pepper|apple|banana|tomato", as.character(sed$object.to.be.labeled)),
+                   "Natural",
+		   "Artificial")
+sed.sum = group_by(sed, Language, Presentation_type, subject, same_noun, IsNat) %>%
+  summarise(m.color = mean(UsesColor), m.adj = mean(UsesAdj))
+sed.sum2 = filter(ungroup(sed.sum), same_noun == "same_noun:  Y", Presentation_type == "1 at a time") %>%
+  select(Language, subject, m.color, m.adj, IsNat) %>%
+  gather(variable, value, -Language, -subject, -IsNat)
+sed.sum2$V = ifelse(sed.sum2$variable == "m.adj", "Other Adjectives", "Color Adjectives")
+
+ggplot(sed.sum2, aes(x=Language, y=value)) +
+  geom_jitter(alpha=.5, position = position_jitter(width = .04, height=.04)) +  
+  facet_grid(IsNat ~ V) +
+  theme_bw() +
+  stat_summary(fun.data = mean_cl_normal, geom = "errorbar", width=.01, colour="#b20000", size=1,alpha=.7) +
+  stat_summary(fun.y = mean, geom = "point", colour="#b20000", size=3, alpha=.7) +
+  ylab("proportion using modifier") +
+  xlab("") +
+  stat_summary(fun.data = give.n, geom = "text", fun.y = median) 
+#ggsave("natural_artificial.pdf", width=4, height=5)
+
+
+
+sed$subject = with(sed, as.factor(paste(subject, Language)))
+s = filter(sed, same_noun == "same_noun:  Y", Presentation_type == "1 at a time")
+l.color = glmer(data=s, family = 'binomial',
+            UsesColor ~ Language + (1|subject) + (1 + Language|object.to.be.labeled))
+print("Color adjective use, 1 at a time")	    
+print(summary(l.color))
+
+
+s = filter(sed, same_noun == "same_noun:  Y", Presentation_type == "2 at a time" | Language == "English")
+l.color = glmer(data=s, family = 'binomial',
+            UsesColor ~ Language + (1|subject) + (1 + Language|object.to.be.labeled))
+print("Color adjective use, 2 at a time")	    
+print(summary(l.color))
+
+
+s2 = filter(sed, same_noun == "same_noun:  Y", Language == "Tsimane")
+l.color = glmer(data=s2, family = 'binomial',
+            UsesColor ~  Presentation_type + (1|subject) + (1 + Presentation_type|object.to.be.labeled))
+summary(l.color)
+
+s = group_by(s, subject, Language) %>% mutate(uses.something = mean(UsesColor) > 0)
+l.color.uses = glmer(data=filter(s, uses.something == T), family = 'binomial',
+            UsesColor ~ Language + (1|subject) + (1 + Language|object.to.be.labeled))
+print("Color adjective use, subjects who use at least 1 color adjective")	    
+print(summary(l.color.uses))
+
+
+l.adj = glmer(data=s, family = 'binomial',
+              UsesAdj ~ Language + (1|subject) + (1 + Language|object.to.be.labeled))
+summary(l.adj)
+
+l.adj.uses = glmer(data=filter(s, uses.something == T), family = 'binomial',
+            UsesAdj ~ Language + (1|subject) + (1 + Language|object.to.be.labeled))
+summary(l.adj.uses)
+
+s.melt = select(s, subject, Language, object.to.be.labeled, UsesColor, UsesAdj) %>%
+  gather(variable, value, -subject, -Language, -object.to.be.labeled)
+  
+l.all = glmer(data=s.melt, family = 'binomial',
+              value ~ variable * Language +
+	     (1 + variable|subject) +
+	     (1 + variable + Language|object.to.be.labeled))
+summary(l.all)
+
+l.class.order.ts = glmer(data=filter(sed, Language == "Tsimane"), family='binomial',
+                      UsesColor ~ presentation_order * IsNat
+		      + (1|subject))
+print(summary(l.class.order.ts))
+
+                  
+
+# RT analysis ---------------------------------------------------
+
+rts = mutate(rts, rt=(Isabel.Time + Rashida.Time)/2)
+
+#object entropy
+rtent = group_by(rts, Language, color_object.label) %>%
+  mutate(label.count = n()) %>%
+  group_by(Language, color_object.label, response) %>%
+  summarise(response.count = n(), total.count = first(label.count), p=response.count/total.count) %>%
+  ungroup() %>% group_by(Language, color_object.label) %>% summarise(ent=sum(-p*log2(p)))
+
+rtent$IsColor = ifelse(grepl("^[A-H]", rtent$color_object.label), "color naming", "object naming")
+rtent = merge(rtent, rts[, c("Language", "color_object.label", "rt")], by = c("Language", "color_object.label"))
+rtent$log.rt = log(rtent$rt)
+#rtent.sum$log.rt = NA
+
+std.error = function(x) sqrt(var(x)/length(x))
+
+
+rtent.sum = group_by(rtent, Language, IsColor, color_object.label) %>%
+  summarise(m.ent=mean(ent),
+            m.rt = mean(log.rt),
+	    se = std.error(log.rt),
+	    l = m.rt - 1.96 * se,
+	    u = m.rt + 1.96 * se)
+	    
+re = arrange(rtent.sum, m.ent) %>% mutate(l=lag(m.ent), too.close= abs(l - m.ent) < .06)
+
+re$jitter = rnorm(nrow(re), 0, .05)
+rtent = merge(rtent, select(re, Language, IsColor, color_object.label, jitter),
+              by = c("Language", "IsColor", "color_object.label"))
+rtent$ent = rtent$ent + rtent$jitter
+rtent.sum = group_by(rtent, Language, IsColor, color_object.label) %>%
+  summarise(m.ent=mean(ent),
+            m.rt = mean(log.rt),
+	    se = std.error(log.rt),
+	    l = m.rt - 1.96 * se,
+	    u = m.rt + 1.96*se)
+
+ggplot(data=rtent, aes(x=ent,y=log.rt,label=color_object.label)) + geom_point(alpha=1, shape=95, size=2) + 
+   facet_grid(IsColor ~ Language, drop = T, scales="free") + theme_bw(18) +
+   geom_smooth(method=lm) +
+   geom_point(data=rtent.sum, aes(x=m.ent, y=m.rt), size=2, colour="red") +
+   geom_errorbar(data=rtent.sum, aes(x=m.ent, ymax=u, ymin=l, y=0), colour='red')
+
+#rtent.sum$m.ent = rtent.sum$m.ent + rnorm(nrow(rtent.sum), 0, .3)
+ggplot(data=rtent, aes(x=ent,y=log.rt,label=color_object.label, group=Language, colour=Language)) +
+  #geom_point(alpha=.4, shape=95, size=3) + 
+  facet_grid(. ~ IsColor, drop = T, scales="free_x") +
+  theme_bw(24) +
+  geom_smooth(method=lm) +
+  geom_point(data=rtent.sum, aes(x=m.ent, y=m.rt, colour=Language), size=3) +
+  geom_errorbar(data=rtent.sum, aes(x=m.ent, ymax=u, ymin=l, y=0, colour=Language)) + 
+  scale_colour_manual(values=c("red", "blue")) +
+  xlab("entropy") +
+  ylab("log reaction time") +
+  theme(legend.position = "bottom")
+#ggsave("object_rts.pdf", width=14, height=12)
+
+rtent.sum$Language = factor(rtent.sum$Language, levels=c("Tsimane", "English"))
+ggplot(data=filter(rtent.sum, IsColor == "color naming"),
+  aes(x=m.ent,
+      y=m.rt,
+      label=color_object.label,
+      group=Language,
+      colour=Language)) +
+  #geom_point(alpha=.4, shape=95, size=3) + 
+  geom_smooth(method=lm, se=F, size=2, alpha=.8) +
+  geom_errorbar(data=filter(rtent.sum, IsColor == "color naming"),
+                aes(x=m.ent, ymax=u, ymin=l, y=0, colour=Language)) +
+  geom_point(size=5) +
+  xlab("Entropy\nColor naming") +
+  ylab("Reaction time (log sec.)") +
+  theme(legend.position = "none") +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank(),
+	axis.line = element_line(colour = "black"),
+	axis.text.x = element_text(size=18),
+	axis.text.y=element_text(size=18),
+	axis.title.y=element_text(size=18),
+	axis.title.x=element_text(size=18)) + 
+  scale_x_continuous(breaks=c(0, 1, 2, 3, 4),
+                     limits=c(0, 4.5)) +
+  scale_y_continuous(breaks=c(0, 2), limits=c(-.3, 2)) +
+  scale_color_manual(values=c("black", "lightgray"))
+ggsave("output/color_naming_rts.pdf", width=432/100, height=511/100 * 1.1)
+
+rtent.sum$Language = factor(rtent.sum$Language, levels=c("Tsimane", "English"))
+ggplot(data=filter(rtent.sum, IsColor != "color naming"),
+       aes(x=m.ent,y=m.rt,label=color_object.label, group=Language, colour=Language)) +
+  #geom_point(alpha=.4, shape=95, size=3) + 
+  geom_smooth(method=lm, se=F, size=2, alpha=.8) +
+  geom_errorbar(data=filter(rtent.sum, IsColor != "color naming"),
+                aes(x=m.ent, ymax=u, ymin=l, y=0, colour=Language)) +
+  geom_point(size=5) +
+  xlab("Entropy\nObject naming") +
+  ylab("Reaction time (log sec.)") +
+  theme(legend.position = "none") +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+	panel.background = element_blank(),
+	axis.line = element_line(colour = "black"),
+	axis.text.x = element_text(size=18),
+	axis.text.y=element_text(size=18),
+	axis.title.y=element_text(size=18),
+	axis.title.x=element_text(size=18)) + 
+  scale_x_continuous(breaks=c(0, 1, 2, 3, 4), limits=c(0, 4.5)) +
+  scale_y_continuous(breaks=c(0, 2), limits=c(-.3, 2)) +
+  scale_color_manual(values=c("black", "lightgray"))
+ggsave("output/object_naming_rts.pdf", width=432/100, height=511/100 * 1.1)
+
+
+rpp = unique(rtent[, c("Language", "color_object.label", "ent", "IsColor")])
+rts.l = merge(rts, rpp, by = c("Language", "color_object.label"))
+
+rts.l$Language = as.factor(rts.l$Language)
+contrasts(rts.l$Language) = contr.sum(2)
+
+
+l.rt.color = lmer(log(rt) ~ scale(ent)  * Language +
+                  (1|subject) +
+		  (1 + Language|color_object.label),
+		  data=subset(rts.l, IsColor == "color naming"))
+print(summary(l.rt.color))
+l.rt.color.0 = lmer(log(rt) ~ scale(ent)  + Language +
+                    (1|subject) +
+		    (1 + Language|color_object.label),
+		    data=subset(rts.l, IsColor == "color naming"))
+print(anova(l.rt.color, l.rt.color.0))
+
+l.rt.object = lmer(log(rt) ~ scale(ent)  * Language +
+                   (1 + ent|subject) +
+		   (1 + Language|color_object.label),
+		   data=filter(rts.l, IsColor != "color naming"))
+print(summary(l.rt.object))
+l.rt.object.0 = lmer(log(rt) ~ scale(ent)  + Language +
+                     (1 + ent|subject) +
+		     (1 + Language|color_object.label),
+		     data=filter(rts.l, IsColor != "color naming"))
+l.rt.object.0.0 = lmer(log(rt) ~ scale(ent) + scale(ent):Language +
+                       (1 + ent|subject) +
+		       (1 + Language|color_object.label),
+		       data=filter(rts.l, IsColor != "color naming"))
+print(anova(l.rt.object, l.rt.object.0.0))
+print(anova(l.rt.object, l.rt.object.0))
+
+
+# Permutation test ----------------------------------------------------------
+
+# Supporting functions for tree navigation -----------------------------
+GetRoot<-function(x,Tree){
+  if (Tree[x] == x){
+    return(x)
+  }
+  else{
+    return(GetRoot(Tree[x],Tree))
+  }
+}
+Merge<-function(x,y,Tree){
+  r1 <- GetRoot(x,Tree)
+  r2 <- GetRoot(y,Tree)
+  # Connect the trees
+  Tree[r1]=r2
+  return(Tree)
+}
+CountPools<-function(Tree){
+  temp <- data.frame(Tree) %>%
+    add_rownames("Id") %>%
+    mutate(Root = (Id==Tree)) %>%
+    dplyr::select(Root)
+  return(sum(temp$Root))
+}
+# Create a function that tells you neighbors of the same color given an Id
+GetNeighbors<-function(data,x){
+  neighbors<-c()
+  # Find neighbors of entry with id x in dataset
+  central <- filter(data,Enumeration==x)
+  crow <- central$row
+  ccolumn <- central$column
+  ccolor <- central$color
+  # Data to the left
+  ldat <- filter(data, row==crow, column<ccolumn) %>% arrange(-column)
+  if (dim(ldat)[1]!=0){
+    if (ldat$color[1] == ccolor){
+      neighbors <- c(neighbors,ldat$Enumeration[1])
+    }
+  }
+  # Data to the right
+  rdat <- filter(data, row==crow, column>ccolumn) %>% arrange(column)
+  if (dim(rdat)[1]!=0){
+    if (rdat$color[1] == ccolor){
+      neighbors <- c(neighbors,rdat$Enumeration[1])
+    }
+  }
+  # Data to the top
+  tdat <- filter(data, row<crow, column==ccolumn) %>% arrange(-row)
+  if (dim(tdat)[1]!=0){
+    if (tdat$color[1] == ccolor){
+      neighbors <- c(neighbors,tdat$Enumeration[1])
+    }
+  }
+  # Data below
+  bdat <- filter(data, row>crow, column==ccolumn) %>% arrange(row)
+  if (dim(bdat)[1]!=0){
+    if (bdat$color[1] == ccolor){
+      neighbors <- c(neighbors,bdat$Enumeration[1])
+    }
+  }
+  # Check immediate neighbors
+  t<-filter(data, row==(crow-1),column==(ccolumn-1))
+  if (dim(t)[1]!=0){
+    if (t$color[1] == ccolor){
+      neighbors <- c(neighbors,t$Enumeration[1])
+    }
+  }
+  t<-filter(data, row==(crow-1),column==(ccolumn+1))
+  if (dim(t)[1]!=0){
+    if (t$color[1] == ccolor){
+      neighbors <- c(neighbors,t$Enumeration[1])
+    }
+  }
+  t<-filter(data, row==(crow+1),column==(ccolumn-1))
+  if (dim(t)[1]!=0){
+    if (t$color[1] == ccolor){
+      neighbors <- c(neighbors,t$Enumeration[1])
+    }
+  }
+  t<-filter(data, row==(crow+1),column==(ccolumn+1))
+  if (dim(t)[1]!=0){
+    if (t$color[1] == ccolor){
+      neighbors <- c(neighbors,t$Enumeration[1])
+    }
+  }
+  return(neighbors)
+}
+
+# Count pools per participant ------------------------------------------
+
+# CurrDat = filter(ColorData,Id==part)
+
+GetPoolCount<-function(CurrDat){
+  # Get the number of clusters in a participant's data
+  # Enumerate the grid.
+  CurrDat<-CurrDat %>% add_rownames("Enumeration")
+  CurrDat$Enumeration <- as.numeric(CurrDat$Enumeration)
+  # Create a tree list.
+  Connections <- seq(1,max(CurrDat$Enumeration))
+  # For each entry in the data, get the neighbors of the same color and call the merge function!
+  for (item in CurrDat$Enumeration){
+    neighbors <- GetNeighbors(CurrDat,item)
+    for (neighbor in neighbors){
+      Connections <- Merge(item,neighbor,Connections)
+    }
+  }
+  return(CountPools(Connections))
+}
+
+ColorData = ColorData %>%
+  mutate(rc=CodeToRowColumn(grid_location)) %>%
+  separate(rc, into=c("row", "column"), sep="_") %>%
+  mutate(row=-as.numeric(row), column=as.numeric(column))
+
+ColorData$Id = paste(ColorData$Experiment,ColorData$subject)
+
+# Set this to something higher than 0 to do the permutation test
+# The permutation test is pretty slow so it's disabled by default
+samples=0
+participant<-c()
+cluster<-c()
+
+for (discard in 1:samples) {
+  for (part in unique(ColorData$Id)){
+    print(c(discard,part))
+    # Create a temporary data frame
+    temp = filter(ColorData,Id==part)
+    # Shuffle
+    temp$color=sample(temp$color)
+    ClusterCount<-GetPoolCount(temp)
+    participant<-c(participant,part)
+    cluster<-c(cluster,ClusterCount)
+  }
+}
+
+# Save your results!
+permutation_test_results = tbl_df(data.frame(participant,cluster))
+
+
+# Work with objects --------------------------------------------------------
+
+english_objects = read.csv("english_objects.csv", stringsAsFactors=F) %>%
+  select(-X) %>%
+  filter(!str_detect(thing, "focal"))
+
+spanish_objects = read.csv("spanish_objects.csv", stringsAsFactors=F) %>%
+  select(-X) %>%
+  filter(!str_detect(thing, "focal"))
+
+tsimane_objects = read.csv("tsimane_objects.csv", stringsAsFactors=F) %>%
+  gather(thing, color, -subject, -Year, -Language) %>%
+  select(-Year)
+
+names(tsimane_objects) = c("subject", "Language", "thing", "color")
+
+objects = rbind(tsimane_objects, english_objects, spanish_objects)
+
+# Clean up names
+objects$thing = gsub("grass.*", "grass", objects$thing)
+objects$thing = gsub("yuca.*ins.*", "yuca inside", objects$thing)
+objects$thing = gsub("yuca.*outs.*", "yuca outside", objects$thing)
+objects$thing = gsub("e\\.b", "e b", objects$thing)
+
+obj = group_by(objects, Language, thing) %>%
+  mutate(total.labels = n()) %>%
+  filter(color %in% as.character(1:11))
+
+#obj$color = ifelse(obj$color %in% as.character(1:11), obj$color, "other")
+
+obj.sum = group_by(obj, thing, color, Language) %>%
+  summarise(n= n(), total.labels=first(total.labels)) %>%
+  ungroup()
+
+  e.simple.ent = obj.sum
+  e.simple.ent$p = with(e.simple.ent, n/total.labels)
+  
+  e.simple.ent = group_by(e.simple.ent, Language, thing) %>%
+     summarise(s = sum(-p*log2(p))) %>% ungroup() 
+  ent = ungroup(e.simple.ent) %>% group_by(Language) %>%
+     summarise(m=mean(s))
+  tsi = filter(e.simple.ent, Language == "Tsimane") %>%
+     arrange(s) %>%
+     mutate(r=rank(s))
+  e.simple.ent = merge(e.simple.ent, tsi[, c("thing", "r")], by = c("thing"))
+
+  e.simple.ent$thing = gsub(" ", "\n", e.simple.ent$thing)
+    e.simple.ent$thing = as.factor(e.simple.ent$thing)
+  e.simple.ent$thing = reorder(e.simple.ent$thing, e.simple.ent$r)
+  e.simple.ent$Language = gsub("Tsimane", "Tsimane'", e.simple.ent$Language)
+  e.simple.ent$Language = factor(e.simple.ent$Language, c("English", "Spanish", "Tsimane'"))
+  
+  filter(e.simple.ent, !str_detect(thing, "yuca")) %>%
+  ggplot(aes(x=thing, y=s + .05, group=Language, colour=Language, fill=Language)) +
+    geom_line(size=2) +
+    ylab("entropy on object color") +
+    xlab("object") +
+    geom_point(size=6) + 
+    #geom_bar(stat="identity", position="dodge") + 
+    theme_bw(20) +
+    theme(legend.position="bottom")  +
+    scale_y_continuous(breaks=c(0, 1.5, 3), limits=c(0, 3.2)) +
+    scale_color_manual(values=c("lightgray", "darkgray", "black")) +
+    ylab("Entropy on Object Color") +
+    theme_bw() +
+    theme(panel.border = element_blank(),
+          panel.grid.major = element_blank(), 
+	  panel.grid.minor = element_blank(),
+	  axis.line = element_line(colour = "black")) +
+    theme(legend.position="none",
+          axis.text.x = element_text(color="black", size=14, angle=90, hjust=1, vjust=.5),
+	  axis.text.y = element_text(color="black", size=18),
+	  axis.title.x = element_blank(),
+	  axis.title.y=element_text(size=20)) +
+    theme(axis.ticks = element_line(size = 1)) 
+  ggsave("output/objects_entropy.pdf", width=710/100, height=497/100)
+
+object_entropy = group_by(e.simple.ent, Language) %>% summarise(m=mean(s))
 
