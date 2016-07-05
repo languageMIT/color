@@ -33,15 +33,18 @@ TSIMANE_COLORS = c("black", "white", "red", "blue", "green", "yellow",
 ENGLISH_COLORS = c("black", "white", "red", "blue", "green", "yellow",
                    "grey", "purple / violet", "orange", "brown", "pink", "celeste")
 
-
 RESTRICT_COOL = F
 FORBIDDEN_COLS = c(7, 9, 11, 13, 15)
-
-RESTRICT_FOCAL = T
+RESTRICT_FOCAL = F
+PRIOR = "Foreground" # "Uniform", "Foreground", "Background", ...
 
 get_mode <- function(x) {
   ux <- unique(x)
   ux[which.max(tabulate(match(x, ux)))]
+}
+
+is_close = function(x, y) {
+  abs(x - y) < .00001
 }
 
 blanky = theme(panel.grid.major = element_blank(),
@@ -146,7 +149,7 @@ ColorData<-filter(ColorData,grid_location %in% sparse_chips_to_use)
 
  load("sparse_chips_to_use.rda")
 
- ColorData = read.csv("color labeling tsimane english spanish oct 2015 v4.csv") %>%
+ ColorData = read.csv("color labeling tsimane english spanish oct 2015 v4.csv", stringsAsFactors=F) %>%
    rename(grid_location=location) %>%
    select(subject, color, Language, Task, grid_location) %>%
    unite(Experiment, Language, Task) %>%
@@ -230,13 +233,13 @@ focal_locations = rbind(focal_ts, focal_en, focal_es)
 
 focal_locations %>%
   group_by(Language, term, Code) %>%
-  summarise(freq=n()) %>%
-  ungroup() %>%
+    summarise(freq=n()) %>%
+    ungroup() %>%
   group_by(Language, term) %>%
-  mutate(Z=sum(freq)) %>%
-  mutate(p=freq/Z) %>%
-  select(-freq) %>%
-  write.csv("output/focal_P_ChipGivenWord.csv")
+    mutate(Z=sum(freq)) %>%
+    mutate(p=freq/Z) %>%
+    select(-freq) %>%
+    write.csv("output/focal_P_ChipGivenWord.csv")
 
 write.csv(focal_locations, "output/focal_locations.csv")
 
@@ -247,8 +250,8 @@ focal_locations = focal_locations %>%
 
 focal_chips = focal_locations %>%
   group_by(Language, term) %>%
-  summarise(Code=get_mode(Code)) %>%
-  ungroup() 
+    summarise(Code=get_mode(Code)) %>%
+    ungroup() 
 
 # For each focal term, how many subjects know that term?
 # first need to convert the color indices in ColorData into terms
@@ -258,19 +261,19 @@ ColorData %>%
   select(subject, color, Language) %>%
   mutate(color=as.character(color)) %>%
   group_by(Language) %>%
-  mutate(color=ifelse(Language == "Tsimane",
-                      TSIMANE_COLORS[as.numeric(color)],
-		      ENGLISH_COLORS[as.numeric(color)])) %>%
-  ungroup() %>%		      
+    mutate(color=ifelse(Language == "Tsimane",
+                        TSIMANE_COLORS[as.numeric(color)],
+    		        ENGLISH_COLORS[as.numeric(color)])) %>%
+    ungroup() %>%		      
   filter(!is.na(color)) %>%
   filter(color %in% focal_locations$term) %>%
   group_by(Language, color) %>%
-  filter(!(Language == "English" & color == "celeste")) %>%
-  mutate(n=length(unique(subject))) %>%
-  ungroup() %>%
+    filter(!(Language == "English" & color == "celeste")) %>%
+    mutate(n=length(unique(subject))) %>%
+    ungroup() %>%
   group_by(Language) %>%
-  mutate(Z=length(unique(subject))) %>%
-  ungroup() %>%
+    mutate(Z=length(unique(subject))) %>%
+    ungroup() %>%
   select(-subject) %>%
   unique() %>%
   mutate(prop_subjects=n/Z) %>%
@@ -304,16 +307,69 @@ ColorData %>%
 
 # Compute conditional entropy ----------------------------------
 
+pixels = read.csv("foreground_background_pixels.csv")
+in_grid = ColorData %>% select(grid_location) %>% unique()
+if (PRIOR == "Uniform") {
+  prior = in_grid %>% mutate(Prior=1/n())
+} else if (PRIOR == "Foreground") {
+  prior = in_grid %>%
+    inner_join(pixels) %>%
+    mutate(PriorStar=(foreground+1)/(foreground+background+2),
+           Z=sum(PriorStar),
+	   Prior=PriorStar/Z) %>%
+    select(-background, -foreground)
+} else if (PRIOR == "Background") {
+  prior = in_grid %>%
+    inner_join(pixels) %>%
+    mutate(PriorStar=(background+1)/(foreground+background+2),
+           Z=sum(PriorStar),
+	   Prior=PriorStar/Z) %>%    
+    select(-background, -foreground)
+} else {
+  assert(PRIOR %in% c("Uniform", "Foreground", "Background"))
+}
+
+# Get the joint distribution of words and chips
+
 ComputeConditionalEntropy = function(ColorData) {
 
-P_ChipGivenWord <- plyr::ddply(ColorData,
-                               c("Experiment","color"),
-			       function(x){return(as.data.frame(prop.table(table(x$grid_location))))})
-P_WordGivenChip <- plyr::ddply(ColorData,
-                               c("Experiment","grid_location"),
-			       function(x){return(as.data.frame(prop.table(table(x$color))))})
-names(P_ChipGivenWord)<-c("Experiment","color","grid_location","Frequency")
-names(P_WordGivenChip)<-c("Experiment","grid_location","color","Frequency")
+P_WordGivenChip = ColorData %>%
+  group_by(Experiment, grid_location, color) %>%
+    summarise(Frequency=n()) %>%
+    ungroup() %>%
+  group_by(Experiment, grid_location) %>%
+    mutate(Z=sum(Frequency)) %>%
+    ungroup() %>%
+  mutate(Probability=Frequency/Z) %>%
+  select(Experiment, grid_location, color, Probability, Frequency) %>%
+  unique()
+
+  P_ChipGivenWord = P_WordGivenChip %>%  # we have p(w|c) for each w and c
+    rename(Likelihood=Frequency) %>%     # use Frequency rather than Probability to increase precision
+    inner_join(prior) %>%                # now we merge in p(c)
+    mutate(Pstar=Likelihood*Prior) %>%   # calculate p(c)p(w|c), which is prop. to p(w, c)
+    group_by(Experiment, color) %>%                  
+      mutate(Z=sum(Pstar)) %>%           # now calculate p(w) = \sum_c p(w, c)
+      ungroup() %>%        
+    mutate(Probability=Pstar/Z) %>%      # p(c|w) = p(c)p(w|c) / p(w)
+    select(Experiment, grid_location, color, Probability)
+
+
+# If uniform prior, do it this way to check
+if (PRIOR == "Uniform") {
+  P_ChipGivenWord_Direct = ColorData %>%
+    group_by(Experiment, grid_location, color) %>%
+      summarise(Frequency=n()) %>%
+      ungroup() %>%
+    group_by(Experiment, color) %>%
+      mutate(Z=sum(Frequency)) %>%
+      ungroup() %>%
+    mutate(Probability=Frequency/Z) %>%
+    select(Experiment, grid_location, color, Probability) %>%
+    unique()
+
+  assert(is_close(P_ChipGivenWord_Direct$Probability, P_ChipGivenWord$Probability))
+}
 
 # Get each chip's score
 GetChipScore<-function(x){
@@ -323,22 +379,20 @@ GetChipScore<-function(x){
     ChipWord=filter(P_ChipGivenWord,
                     color==CurrCol,
 		    grid_location==x$grid_location[1],
-		    Experiment==x$Experiment[1])$Frequency
+		    Experiment==x$Experiment[1])$Probability
     WordChip=filter(P_WordGivenChip,
                     grid_location==x$grid_location[1],
 		    color==CurrCol,
-		    Experiment==x$Experiment[1])$Frequency
+		    Experiment==x$Experiment[1])$Probability
     Val=Val+WordChip*log2(1.0/ChipWord)
   }
   return(Val)
 }
 
-ChipEntropies <- plyr::ddply(ColorData,c("Experiment","grid_location"),GetChipScore)
+ChipEntropies <- plyr::ddply(ColorData, c("Experiment","grid_location"), GetChipScore)
 names(ChipEntropies)<-c("Experiment","grid_location","Entropy")
 ChipNo<-length(unique(ChipEntropies$grid_location))
-# This line assumes that each subdataset has the same number of chips
-ChipEntropies <- ChipEntropies %>% mutate(Probability=1/ChipNo, ExpEnt=Entropy*Probability)
-
+ChipEntropies <- ChipEntropies %>% inner_join(prior)
 ChipEntropies
 }
 
@@ -346,16 +400,17 @@ ChipEntropies = ComputeConditionalEntropy(ColorData)
 
 LanguageEntropies <- ChipEntropies %>%
   group_by(Experiment) %>%
-  summarise(Uncertainty=sum(ExpEnt)) 
+  summarise(Uncertainty=sum(Entropy*Prior))
 
 write.csv(ChipEntropies, "output/Latest_ChipEntropies.csv")
+write.csv(LanguageEntropies, "output/Latest_EntropyByLanguage.csv")
 
 ChipEntropies %>%
-  select(-ExpEnt, -Probability) %>%
+  select(-Prior) %>%
   group_by(Experiment) %>%
-  arrange(Entropy) %>%
-  mutate(X=1:n()) %>%
-  ungroup() %>%
+    arrange(Entropy) %>%
+    mutate(X=1:n()) %>%
+    ungroup() %>%
   select(-Entropy) %>%
   spread(Experiment, grid_location) %>%
   select(-X) %>%
@@ -374,8 +429,8 @@ BootstrapResampleColorData = function(ColorData) {
     ColorData %>%
         mutate(color=as.character(color)) %>%
         group_by(Experiment, grid_location) %>%
-        sample_frac(replace=T) %>%
-        ungroup()
+          sample_frac(replace=T) %>%
+          ungroup()
 }
 
 num_bootstrap_samples = 100
@@ -394,8 +449,8 @@ for (i in 1:num_bootstrap_samples) {
 
 ResampledChipEntropies %>%
   group_by(Experiment, grid_location) %>%
-  summarise(lower=quantile(Entropy, .05), upper=quantile(Entropy, .95)) %>%
-  ungroup() %>%
+    summarise(lower=quantile(Entropy, .05), upper=quantile(Entropy, .95)) %>%
+    ungroup() %>%
   separate(Experiment, into=c("Language", "Type")) %>%
   inner_join(ChipEntropies) -> ChipEntropiesWithCI
 
@@ -415,54 +470,15 @@ es_ts = cor.test(filter(ChipEntropies, Language == "Spanish")$Entropy,
           	 method='spearman')[4]$estimate
 
 
-# Informativity per language --------------------------
-
-ChipEntropies %>%
-  group_by(Language, Type) %>%
-  summarise(LangEntropy=mean(Entropy)) %>%
-  write.csv("output/Latest_EntropyByLanguage.csv")
-
-
 # Modal informativity --------------------------
 
 # Suppose every chip is just named according to its modal label.
 ModalColorData = ColorData %>%
   group_by(Experiment, grid_location) %>%
-  summarise(color=get_mode(color)) %>%
-  ungroup()
+    summarise(color=get_mode(color)) %>%
+    ungroup()
 
-
-Modal_P_ChipGivenWord <- plyr::ddply(ModalColorData,c("Experiment","color"),
-     function(x){return(as.data.frame(prop.table(table(x$grid_location))))})
-Modal_P_WordGivenChip <- plyr::ddply(ModalColorData,c("Experiment","grid_location"),
-     function(x){return(as.data.frame(prop.table(table(x$color))))})
-names(Modal_P_ChipGivenWord)<-c("Experiment","color","grid_location","Frequency")
-names(Modal_P_WordGivenChip)<-c("Experiment","grid_location","color","Frequency")
-
-# Get each chip's score
-GetModalChipScore<-function(x){
-  # Sum over all words.
-  Val=0
-  for (CurrCol in unique(x$color)){
-    ChipWord=filter(Modal_P_ChipGivenWord,
-                   color==CurrCol,
-		   grid_location==x$grid_location[1],
-		   Experiment==x$Experiment[1])$Frequency
-    WordChip=filter(Modal_P_WordGivenChip,
-                    grid_location==x$grid_location[1],
-		    color==CurrCol,
-		    Experiment==x$Experiment[1])$Frequency
-    Val=Val+WordChip*log2(1.0/ChipWord)
-  }
-  return(Val)
-}
-
-ModalChipEntropies <- plyr::ddply(ModalColorData,c("Experiment","grid_location"),GetModalChipScore)
-names(ModalChipEntropies)<-c("Experiment","grid_location","Entropy")
-ModalChipNo<-length(unique(ModalChipEntropies$grid_location))
-# This line assumes that each subdataset has the same number of chips
-ModalChipEntropies <- ModalChipEntropies %>%
-  mutate(Probability=1/ModalChipNo, ExpEnt=Entropy*Probability)
+ModalChipEntropies = ComputeConditionalEntropy(ModalColorData)
 
 write.csv(ModalChipEntropies, "output/Latest_ModalChipEntropies.csv")
 
@@ -474,8 +490,8 @@ ModalChipEntropies <- ModalChipEntropies %>%
 
 ModalChipEntropies %>%
   group_by(Language, Type) %>%
-  summarise(LangEntropy=mean(Entropy)) %>%
-  write.csv("output/Latest_ModalEntropyByLanguage.csv")
+    summarise(LangEntropy=mean(Entropy)) %>%
+    write.csv("output/Latest_ModalEntropyByLanguage.csv")
 
 
 # By-subject average surprisal ------------------------
@@ -545,69 +561,38 @@ if (RESTRICT_COOL) {
 }
 
 # Compute WCS mode conditional entropy ----------------------
+# or don't
 
-WCS_Modes<-tbl_df(plyr::ddply(WCS,c("Experiment","grid_location"),function(x){return(data.frame(table(x$color)))}))
-names(WCS_Modes)<-c("Experiment","grid_location","color","frequency")
-
-# Get modes
-WCS_Modes <- WCS_Modes %>% dplyr::group_by(Experiment,grid_location) %>% dplyr::top_n(1,frequency)
-# Check total number of color words
-#res<-WCS_Modes %>% dplyr::group_by(Experiment) %>% dplyr::summarise(ColorWords=length(unique(color)))
-# Delete ties
-WCS_Modes <- WCS_Modes %>% dplyr::group_by(Experiment,grid_location) %>% dplyr::summarise(color=color[1])
-
-WCS_Mode_ChipGivenWord <- plyr::ddply(WCS_Modes,c("Experiment","color"),function(x){return(as.data.frame(prop.table(table(x$grid_location))))})
-names(WCS_Mode_ChipGivenWord)<-c("Experiment","color","grid_location","Probability")
-
-WCS_Modes<-full_join(WCS_Modes,WCS_Mode_ChipGivenWord)
-WCS_Modes <- WCS_Modes %>% mutate(Prior=1/length(unique(WCS_Modes$grid_location)),ExpEnt=Prior*log2(1.0/Probability))
-
-WordNumbers <- WCS_Modes %>% dplyr::group_by(Experiment) %>% dplyr::summarise(WordNumber = length(unique(color)))
-
-WCS_Modes <- WCS_Modes %>% dplyr::group_by(Experiment) %>% dplyr::summarise(ConEnt=sum(ExpEnt))
-
-WCS_Modes <- full_join(WordNumbers, WCS_Modes)
+#WCS_Modes<-tbl_df(plyr::ddply(WCS,c("Experiment","grid_location"),function(x){return(data.frame(table(x$color)))}))
+#names(WCS_Modes)<-c("Experiment","grid_location","color","frequency")
+#
+## Get modes
+#WCS_Modes <- WCS_Modes %>% dplyr::group_by(Experiment,grid_location) %>% dplyr::top_n(1,frequency)
+## Check total number of color words
+##res<-WCS_Modes %>% dplyr::group_by(Experiment) %>% dplyr::summarise(ColorWords=length(unique(color)))
+## Delete ties
+#WCS_Modes <- WCS_Modes %>% dplyr::group_by(Experiment,grid_location) %>% dplyr::summarise(color=color[1])
+#
+#WCS_Mode_ChipGivenWord <- plyr::ddply(WCS_Modes,c("Experiment","color"),function(x){return(as.data.frame(prop.table(table(x$grid_location))))})
+#names(WCS_Mode_ChipGivenWord)<-c("Experiment","color","grid_location","Probability")
+#
+#WCS_Modes<-full_join(WCS_Modes,WCS_Mode_ChipGivenWord)
+#WCS_Modes <- WCS_Modes %>% mutate(Prior=1/length(unique(WCS_Modes$grid_location)))
+#
+#WordNumbers <- WCS_Modes %>% dplyr::group_by(Experiment) %>% dplyr::summarise(WordNumber = length(unique(color)))
+#
+#WCS_Modes <- WCS_Modes %>% dplyr::group_by(Experiment) %>% dplyr::summarise(ConEnt=sum(Probability*log2(1.0/Probability)))
+#
+#WCS_Modes <- full_join(WordNumbers, WCS_Modes)
 
 #WCS_Modes %>% filter(WordNumber %in% c(7,8)) %>%
 #  ggplot(aes(x=WordNumber,y=ConEnt,label=Experiment))+geom_text()
 
+
 # Compute WCS conditional entropy --------------------------
 
-WCS_ChipGivenWord <- plyr::ddply(WCS,c("Experiment","color"),function(x){return(as.data.frame(prop.table(table(x$grid_location))))})
-WCS_WordGivenChip <- plyr::ddply(WCS,c("Experiment","grid_location"),function(x){return(as.data.frame(prop.table(table(x$color))))})
-names(WCS_ChipGivenWord)<-c("Experiment","color","grid_location","Frequency")
-names(WCS_WordGivenChip)<-c("Experiment","grid_location","color","Frequency")
-
-
-# Get each chip's score
-WCS_GetChipScore<-function(x){
-  # Sum over all words.
-  Val=0
-  for (CurrCol in unique(x$color)){
-    ChipWord=filter(WCS_ChipGivenWord,
-                    color==CurrCol,
-		    grid_location==x$grid_location[1],
-		    Experiment==x$Experiment[1])$Frequency
-    WordChip=filter(WCS_WordGivenChip,
-                    grid_location==x$grid_location[1],
-		    color==CurrCol,
-		    Experiment==x$Experiment[1])$Frequency
-    #print(x$Experiment[1])
-    #print(x$grid_location[1])
-    if (WordChip != 0){
-      Val=Val+WordChip*log2(1.0/ChipWord)
-    }
-  }
-  return(Val)
-}
-
 WCS = filter(WCS, !is.na(Experiment))
-WCS_ChipEntropies <- plyr::ddply(WCS,c("Experiment","grid_location"),WCS_GetChipScore)
-names(WCS_ChipEntropies)<-c("Experiment","grid_location","Entropy")
-
-ChipNo<-length(unique(WCS_ChipEntropies$grid_location))
-# This line assumes that each subdataset has the same number of chips: CONFIRMED ITS CORRECT
-WCS_ChipEntropies <- WCS_ChipEntropies %>% mutate(Probability=1/ChipNo, ExpEnt=Entropy*Probability)
+WCS_ChipEntropies = ComputeConditionalEntropy(WCS)
 
 write.csv(WCS_ChipEntropies, "output/Latest_WCS_ChipEntropies.csv")
 
@@ -636,28 +621,28 @@ sedivy = read.csv("sedivy_data_fixed.csv")
 sedivy %>%
   rename(Task=Presentation_type) %>%
   group_by(Language, Task) %>%
-  summarise(NumSubjects=length(unique(subject))) %>%
-  ungroup() ->
+    summarise(NumSubjects=length(unique(subject))) %>%
+    ungroup() ->
   sedivy_num_subjects
 
 ColorData %>%
   separate(Experiment, into=c("Language", "Task"), sep="_") %>%
   group_by(Language, Task) %>%
-  summarise(NumSubjects=length(unique(subject))) %>%
-  ungroup() ->
+    summarise(NumSubjects=length(unique(subject))) %>%
+    ungroup() ->
   labelling_num_subjects
 
 focal_locations %>%
   group_by(Language) %>%
-  summarise(NumSubjects=length(unique(Subject))) %>%
-  ungroup() %>%
+    summarise(NumSubjects=length(unique(Subject))) %>%
+    ungroup() %>%
   mutate(Task="FocalColors") ->
   objects_num_subjects
 
 rts %>%
   group_by(Language) %>%
-  summarise(NumSubjects=length(unique(subject))) %>%
-  ungroup() %>%
+    summarise(NumSubjects=length(unique(subject))) %>%
+    ungroup() %>%
   mutate(Task="RT") ->
   rts_num_subjects
 
@@ -696,22 +681,25 @@ special_focal_locations = filter(focal_locations, term %in% SPECIAL_FOCAL_COLORS
 special_focal_density = group_by(special_focal_locations, Language, Row, Column, term) %>% summarise(value=n())
 write.csv(special_focal_density, "output/special_focal_density.csv") # to be used by contours.py
 
-# E10 is missing, so interpolate it from E8, E12, D9, D11, F9, F11
-interp_sources = c("E8", "E12", "D9", "D11", "F9", "F11")
-interp_rows = ChipEntropies %>%
-  filter(grid_location %in% interp_sources) %>%
-  group_by(Language, Type) %>%
-  summarise(Entropy=mean(Entropy)) %>%
-  ungroup() %>%
-  mutate(grid_location="E10", Probability=0.0125)
+# If E10 is missing, interpolate it from E8, E12, D9, D11, F9, F11
+if (!("E10" %in% as.character(ChipEntropies$grid_location))) {
+  interp_sources = c("E8", "E12", "D9", "D11", "F9", "F11")
+  interp_rows = ChipEntropies %>%
+    filter(grid_location %in% interp_sources) %>%
+    group_by(Language, Type) %>%
+      summarise(Entropy=mean(Entropy)) %>%
+      ungroup() %>%
+    inner_join(prior)
   
-  
-ChipEntropiesInterp = ChipEntropies %>%
-  select(Language, Type, Entropy, grid_location, Probability) %>%
-  rbind(interp_rows) %>%
-  mutate(RowColumn=CodeToRowColumn(grid_location)) %>%
-  separate(RowColumn, into=c("Row", "Column"), sep="_") %>%
-  mutate(Row=as.numeric(Row), Column=as.numeric(Column))
+  ChipEntropiesInterp = ChipEntropies %>%
+    select(Language, Type, Entropy, grid_location, Prior) %>%
+    rbind(interp_rows) %>%
+    mutate(RowColumn=CodeToRowColumn(grid_location)) %>%
+    separate(RowColumn, into=c("Row", "Column"), sep="_") %>%
+    mutate(Row=as.numeric(Row), Column=as.numeric(Column))
+} else {
+  ChipEntropiesInterp = ChipEntropies
+}
 
 # plot heatmap of entropy 
 (
@@ -784,8 +772,8 @@ focal_locations %>%
   mutate(Code=RowColumnToCode(Row, Column)) %>%
   select(-Row, -Column) %>%
   group_by(Language, Code) %>%
-  summarise(n=n()) %>%
-  ungroup() %>%
+    summarise(n=n()) %>%
+    ungroup() %>%
   write.csv("output/overall_focal_density.csv")
 
 
@@ -844,7 +832,7 @@ for (lang in unique(d$Language)) {
 
 d_ci = ChipEntropiesWithCI %>%
     filter(Type == "Open") %>%
-    select(-ExpEnt, -Row, -Column, Probability) %>%
+    select(-Row, -Column, Prior) %>%
     rename(Code=grid_location)
 
 d_ci$score_rank = NA
@@ -880,7 +868,7 @@ d_ci %>%
     facet_wrap(~Language, ncol=4) +
     xlab("Chips (rank ordered)") + 
     ylab("Average surprisal") +
-    ylim(0, 6)
+    ylim(0, NA)
 
 ggsave("output/snake_open_with_ci.pdf", height=4, width=12)
 
@@ -900,7 +888,7 @@ d_ci %>%
     facet_wrap(~Language, ncol=4) +
     xlab("Chips (rank ordered)") + 
     ylab("Average surprisal") +
-    ylim(0, 6)
+    ylim(0, NA)
 
 ggsave("output/snake_open.pdf", height=3, width=10)
 
@@ -953,8 +941,8 @@ ggsave("output/tsimane_vs_spanish_surprisal.pdf")
 d_to_plot = d_open %>%
   mutate(Language=factor(Language)) %>%
   group_by(Language) %>%
-  mutate(lang_score=sum(Entropy), min_score=min(Entropy), max_score=max(Entropy)) %>%
-  ungroup() %>%
+    mutate(lang_score=sum(Entropy), min_score=min(Entropy), max_score=max(Entropy)) %>%
+    ungroup() %>%
   mutate(Language=reorder(factor(Language), -lang_score))
 
 d_to_plot %>%
@@ -1025,19 +1013,19 @@ ggsave("output/WCS_simple_tornado.pdf", height=8.5, width=7)
 
 d_open %>%
   group_by(score_rank) %>%
-  summarise(Code=get_mode(Code)) %>%
-  mutate(y=1) %>%
-  ggplot(aes(x=score_rank, y=y, color=Code, fill=Code)) +
-    scale_color_manual(values=cc, guide=F) +
-    scale_fill_manual(values=cc, guide=F) +
-    geom_tile() +
-    theme_bw() +
-    theme(axis.text.y = element_blank(),
-          axis.ticks.y = element_blank(),
-	  axis.text.x = element_blank(),
-	  axis.ticks.x = element_blank()) +
-    ylab("") +
-    xlab("Colors by increasing average surprisal =>")
+    summarise(Code=get_mode(Code)) %>%
+    mutate(y=1) %>%
+    ggplot(aes(x=score_rank, y=y, color=Code, fill=Code)) +
+      scale_color_manual(values=cc, guide=F) +
+      scale_fill_manual(values=cc, guide=F) +
+      geom_tile() +
+      theme_bw() +
+      theme(axis.text.y = element_blank(),
+            axis.ticks.y = element_blank(), 
+  	    axis.text.x = element_blank(),
+	    axis.ticks.x = element_blank()) +
+      ylab("") +
+      xlab("Colors by increasing average surprisal =>")
 
 ggsave("output/WCS_strip.pdf", height=1, width=10)
 
@@ -1069,11 +1057,11 @@ emp.foc$term = as.character(emp.foc$term)
     x.sum <- group_by(x, grid_location, Language, Task, Row, Column) %>%
       mutate(location.n = n()) %>%
       group_by(grid_location, color, location.n, Language, Task, Row, Column) %>%
-      summarise(n=n()) %>%
-      ungroup() %>%
+        summarise(n=n()) %>%
+        ungroup() %>%
       group_by(grid_location, location.n, Language, Task, Row, Column) %>%
-      mutate(n.max=max(n)) %>%
-      filter(n == n.max)
+        mutate(n.max=max(n)) %>%
+        filter(n == n.max)
       
     x.sum$modal.pct = x.sum$n / x.sum$location.n
 
@@ -1161,11 +1149,11 @@ ggsave("output/tsimane_fixed_diamond.pdf", width=DIAMOND_WIDTH, height=DIAMOND_H
 e = ColorData %>%
   separate(Experiment, into=c("Language", "Task"), sep="_") %>%
   group_by(Language, Task, grid_location) %>%
-  mutate(location.n = n()) %>%
-  ungroup() %>%
+    mutate(location.n = n()) %>%
+    ungroup() %>%
   group_by(Language, Task, color) %>%
-  mutate(color.n = n()) %>%
-  group_by(Language, Task, grid_location, color) %>% 
+    mutate(color.n = n()) %>%
+    group_by(Language, Task, grid_location, color) %>% 
   mutate(n=n()) %>%
   ungroup()
   
@@ -1202,7 +1190,7 @@ e.ent = e %>%
   print(with(filter(tsimane, Task == "Fixed"), cor.test(e, Spanish, method='pearson')))
   print(with(tsimane, cor.test(e, Spanish, method='pearson')))
 
-  m = lm(e ~ Age + Spanish + Education, data=tsimane)
+  m = lm(e ~ Age + Spanish, data=tsimane)
   print(summary(m))
 
 
