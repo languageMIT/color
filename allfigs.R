@@ -25,8 +25,7 @@ LABELLING_DATA = "Kyle"  # "Julian", "Kyle", or "Richard"
 
 SPECIAL_FOCAL_COLORS = c("blue", "green", "red", "yellow")
 
-
-TSIMANE_COLORS = c("black", "white", "red", "blue", "green", "yellow",
+TSIMANE_COLORS = c("black", "white", "red", "blue", "green", "yellow2",
                    "grey", "purple / violet", "orange", "brown", "yellowish",
 		   "yellow", "orange", "greenish", "brownish")
 
@@ -36,7 +35,8 @@ ENGLISH_COLORS = c("black", "white", "red", "blue", "green", "yellow",
 RESTRICT_COOL = F
 FORBIDDEN_COLS = c(7, 9, 11, 13, 15)
 RESTRICT_FOCAL = F
-PRIOR = "Foreground" # "Uniform", "Foreground", "Background", ...
+PRIOR = "Uniform" # "Uniform", "Foreground", "Background", ...
+RESTRICT_CIELAB = T
 
 get_mode <- function(x) {
   ux <- unique(x)
@@ -279,12 +279,21 @@ ColorData %>%
   mutate(prop_subjects=n/Z) %>%
   write.csv("output/how_many_subjects_use_terms.csv")
 
+
+cielab_chips = c("A6", "A8", "B9", "C2", "C10", "D19", "E12", "E14", "E16", "E18", "F3", "F5", "F7", "F11", "F13", "F15", "F17", "F19", "G2", "G8", "G14", "G16", "H1", "H15")
+assert(length(cielab_chips) == 24)
+
+
 if (RESTRICT_FOCAL) {
 
    #allowed_chips = filter(focal_chips, Language == "Spanish")$Code %>% as.character()
    allowed_chips = c("E14", "H3", "E8", "A14", "E2", "D19", "G18", "F1", "B5")
    ColorData = filter(ColorData, as.character(grid_location) %in% allowed_chips)
+}
 
+
+if (RESTRICT_CIELAB) {
+   ColorData = filter(ColorData, as.character(grid_location) %in% cielab_chips)
 }
 
 # Read demographics --------------------------------------------
@@ -459,15 +468,15 @@ ResampledChipEntropies %>%
 
 en_es = cor.test(filter(ChipEntropies, Language == "English")$Entropy,
                  filter(ChipEntropies, Language == "Spanish")$Entropy,
-          	 method='spearman')[4]$estimate
+          	 method='spearman')
 
 en_ts = cor.test(filter(ChipEntropies, Language == "English")$Entropy,
                  filter(ChipEntropies, Language == "Tsimane")$Entropy,
-          	 method='spearman')[4]$estimate
+          	 method='spearman')
 
 es_ts = cor.test(filter(ChipEntropies, Language == "Spanish")$Entropy,
                  filter(ChipEntropies, Language == "Tsimane")$Entropy,
-          	 method='spearman')[4]$estimate
+          	 method='spearman')
 
 
 # Modal informativity --------------------------
@@ -537,7 +546,7 @@ ConversionChart <- filter(ConversionChart,BoliviaCode %in% unique(ColorData$grid
 
 WCS <- filter(WCS,grid_location %in% unique(ConversionChart$grid_location))
 
-assert(length(unique(WCS$grid_location)) == 80 | RESTRICT_COOL | RESTRICT_FOCAL)
+assert(length(unique(WCS$grid_location)) == 80 | RESTRICT_COOL | RESTRICT_FOCAL| RESTRICT_CIELAB)
 
 WCS <- inner_join(WCS,
                   ConversionChart,
@@ -558,6 +567,10 @@ if (RESTRICT_COOL) {
      filter(!(Column %in% FORBIDDEN_COLS)) %>%
      mutate(grid_location=RowColumnToCode(Row, Column)) %>%
      select(-Row, -Column) -> WCS
+}
+
+if (RESTRICT_CIELAB) {
+   WCS = filter(WCS, as.character(grid_location) %in% cielab_chips)
 }
 
 # Compute WCS mode conditional entropy ----------------------
@@ -682,7 +695,7 @@ special_focal_density = group_by(special_focal_locations, Language, Row, Column,
 write.csv(special_focal_density, "output/special_focal_density.csv") # to be used by contours.py
 
 # If E10 is missing, interpolate it from E8, E12, D9, D11, F9, F11
-if (!("E10" %in% as.character(ChipEntropies$grid_location))) {
+if (!RESTRICT_CIELAB & !("E10" %in% as.character(ChipEntropies$grid_location))) {
   interp_sources = c("E8", "E12", "D9", "D11", "F9", "F11")
   interp_rows = ChipEntropies %>%
     filter(grid_location %in% interp_sources) %>%
@@ -795,7 +808,6 @@ focal_locations %>%
 ##)
 ##
 ##ggsave("output/heatmaps_with_focal_contours.pdf", height=5, width=13)
-
 
 # Snake plot ----------------------------------------
 
@@ -935,6 +947,58 @@ d_open %>%
     ylab("Spanish surprisal")
 
 ggsave("output/tsimane_vs_spanish_surprisal.pdf")
+
+d_open %>%
+    select(-score_rank) %>%
+    filter(Language %in% c("English", "Spanish", "Tsimane")) %>%
+    spread(Language, Entropy) %>%
+    ggplot(aes(x=English,
+               y=Tsimane,
+	       xmin=English-.05,
+	       xmax=English+.05,
+	       ymin=Tsimane-.05,
+	       ymax=Tsimane+.05,
+	       color=Code,
+	       fill=Code)) +
+    geom_rect() +
+    theme_bw(18) +
+    blanky +
+    scale_color_manual(values=cc, guide=F) +
+    scale_fill_manual(values=cc, guide=F) +
+    xlab("Tsimane' surprisal") +
+    ylab("English surprisal")
+
+ggsave("output/tsimane_vs_english_surprisal.pdf")
+
+ChipEntropies %>%
+  rename(Code=grid_location) %>%
+  spread(Type, Entropy) %>%
+  ggplot(aes(x=Open, y=Fixed,
+             xmin=Open-.05, xmax=Open+.05,
+	     ymin=Fixed-.05, ymax=Fixed+.05,
+	     color=Code, fill=Code)) +
+  geom_rect() +
+  theme_bw(18) +
+  blanky +
+  scale_color_manual(values=cc, guide=F) +
+  scale_fill_manual(values=cc, guide=F) +
+  xlab("Open task surprisal") +
+  ylab("Fixed task surprisal") +
+  facet_wrap(~Language) +
+  xlim(0, 6) +
+  ylim(0, 6)
+
+ggsave("output/open_vs_fixed_surprisal.pdf", height=4, width=10)
+
+print("Open-Fixed Correlations:")
+ChipEntropies %>%
+  spread(Type, Entropy) %>%
+  group_by(Language) %>%
+    summarise(r=cor.test(Open, Fixed, method="pearson")[[4]],
+              rho=cor.test(Open, Fixed, method="spearman")[[4]]) %>%
+  print()	      
+	    
+
 
 # Tapestry plot ----------------------------------------
 
@@ -1286,11 +1350,12 @@ sed.obj = group_by(filter(sed, same_noun != "same_noun:  N"),
                    object.to.be.labeled,
 		   Language,
 		   Presentation_type,
-		   presentation_order) %>% summarise(m=mean(color != "N"))
+		   presentation_order) %>%
+          summarise(m=mean(color != "N"))
 sed.obj$presentation_order = as.factor(sed.obj$presentation_order)
 sed.obj$object.to.be.labeled = reorder(sed.obj$object.to.be.labeled, sed.obj$m)
 sed.obj$IsNat = ifelse(grepl("pepper|apple|banana|tomato",
-                       as.character(sed.obj$object.to.be.labeled)),
+                             as.character(sed.obj$object.to.be.labeled)),
 		       "Artificial",
 		       "Natural")
 
