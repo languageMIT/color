@@ -36,7 +36,7 @@ RESTRICT_COOL = F
 FORBIDDEN_COLS = c(7, 9, 11, 13, 15)
 RESTRICT_FOCAL = F
 PRIOR = "Uniform" # "Uniform", "Foreground", "Background", ...
-RESTRICT_CIELAB = T
+RESTRICT_CIELAB = F
 
 get_mode <- function(x) {
   ux <- unique(x)
@@ -527,8 +527,6 @@ WCS$Color<-as.character(WCS$Color)
 # some colors are called NA and R thinks they're missing values
 WCS[which(is.na(WCS$Color)),]$Color="NA"
 
-# clean up
-rm(answers,languages,munsell)
 
 #Standardize with main dataset
 names(WCS)<-c("Experiment","grid_location","color")
@@ -1877,3 +1875,112 @@ obj.sum = group_by(obj, thing, color, Language) %>%
 object_entropy = group_by(e.simple.ent, Language) %>% summarise(m=mean(s))
 write.csv(object_entropy, "output/object_entropy.csv")
 
+## Calculate type-token ratios on WCS ----------------------------
+
+Y = 20
+
+get_ttr = function(d) {
+ttrs = c()
+hapaxes = c()
+
+NUM_SAMPLES = 1000
+
+for(i in 1:NUM_SAMPLES) {
+  d %>%
+    select(subject) %>%
+    unique() %>%
+    mutate(ok=as.numeric(as.factor(subject)) %in% sample(1:n(), Y)) %>%
+    inner_join(d) %>%
+    filter(ok) %>%
+    group_by(color) %>%
+      mutate(num_color_tokens=n()) %>%
+      ungroup() %>%
+    summarise(num_tokens=length(color),
+              num_types=length(unique(color)),
+	      ttr=num_types/num_tokens,
+	      hapax_rate=sum(num_color_tokens==1)/num_tokens) -> d_ttr
+  ttrs = c(ttrs, d_ttr$ttr)
+  hapaxes = c(hapaxes, d_ttr$hapax_rate)
+}
+
+d_ttr = data.frame(ttr=ttrs, hapax_rate=hapaxes, baseline=T)
+d_ttr
+}
+
+ts_ttr = ColorData %>% filter(Experiment == "Tsimane_Open") %>% get_ttr()
+ts_ttr_fixed = ColorData %>% filter(Experiment == "Tsimane_Fixed") %>% get_ttr()
+
+answers %>%
+  group_by(Lang_Name) %>%
+    mutate(s=length(unique(Subject)), ok=s >= Y) %>%
+    ungroup() %>%
+  filter(ok) -> answers
+
+answers %>%
+  select(Lang_Name, Subject, s) %>%
+  unique() %>%
+  group_by(Lang_Name) %>%
+    mutate(ok=Subject %in% sample(1:s, Y)) %>%
+    ungroup() %>%
+  filter(ok) %>%
+  inner_join(answers) -> answers_Y
+
+assert(answers_Y %>%
+  group_by(Lang_Name) %>%
+    summarise(s=length(unique(Subject))) %>%
+    select(s) %>%
+    unique() == Y)
+
+WCS_ttr = answers_Y %>%
+  group_by(Lang_Name, Term) %>%
+    mutate(num_color_tokens=n()) %>%
+    ungroup() %>%
+  group_by(Lang_Name) %>%
+    summarise(num_tokens=length(Term),
+              num_types=length(unique(Term)),
+	      ttr=num_types/num_tokens,
+	      hapax_rate=sum(num_color_tokens==1)/num_tokens) %>%
+    ungroup()
+
+WCS_ttr %>%
+  ggplot(aes(x=ttr)) +
+    geom_histogram(bins=50) +
+    xlab("Type-Token Ratio") +
+    ylab("Number of languages") +
+    geom_vline(color="red", aes(xintercept=mean(ts_ttr$ttr))) +
+    geom_vline(color="blue", aes(xintercept=mean(ts_ttr_fixed$ttr)))
+
+ggsave("output/wcs_ttr.pdf", width=5.6, height=3.8)
+
+WCS_ttr %>%
+  ggplot(aes(x=hapax_rate)) +
+    geom_histogram(bins=50) +
+    xlab("Hapax rate") +
+    ylab("Number of languages") +
+    geom_vline(color="red", aes(xintercept=mean(ts_ttr$hapax_rate))) +
+    geom_vline(color="blue", aes(xintercept=mean(ts_ttr_fixed$hapax_rate)))    
+
+ggsave("output/wcs_hapax.pdf", width=5.6, height=3.8)
+
+ts_ttr = rbind(ts_ttr, select(WCS_ttr, ttr, hapax_rate) %>% mutate(baseline=F))
+
+ts_ttr %>%
+  ggplot(aes(x=ttr, fill=baseline)) +
+    geom_histogram(aes(y=..ncount..), bins=50) +
+    ylab("Number of languages") +
+    xlab("Type/token ratio")
+
+ggsave("output/wcs_ttr_with_baseline.pdf", width=5.6, height=3.8)
+
+ts_ttr %>%
+  ggplot(aes(x=hapax_rate, fill=baseline)) +
+    geom_histogram(aes(y=..ncount..), bins=50, alpha=.7, position="identity") +
+    ylab("Number of languages") +
+    xlab("Hapax rate")
+
+ggsave("output/wcs_hapax_with_baseline.pdf", width=5.6, height=3.8)
+
+
+    	      
+    
+  
