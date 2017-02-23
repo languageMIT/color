@@ -520,8 +520,9 @@ answers<-merge(munsell,answers,by.y="Chip",by.x="ChipNumber") %>% tbl_df
 answers<-tbl_df(merge(languages,answers,by="Lang_Id"))
 
 # Keep only what you need
-answers<-dplyr::select(answers,Lang_Name,FielConcat,Term)
-WCS<-dplyr::rename(answers,Language=Lang_Name,Chip=FielConcat,Color=Term)
+WCS = answers %>%
+  select(Lang_Name, FielConcat, Term) %>%
+  rename(Language=Lang_Name, Chip=FielConcat, Color=Term)
 
 WCS$Color<-as.character(WCS$Color)
 # some colors are called NA and R thinks they're missing values
@@ -543,6 +544,8 @@ ConversionChart <- filter(ConversionChart,BoliviaCode %in% unique(ColorData$grid
   dplyr::rename(grid_location=WCSCode)
 
 WCS <- filter(WCS,grid_location %in% unique(ConversionChart$grid_location))
+answers_bak = answers
+answers <- filter(answers, FielConcat %in% unique(ConversionChart$grid_location))
 
 assert(length(unique(WCS$grid_location)) == 80 | RESTRICT_COOL | RESTRICT_FOCAL| RESTRICT_CIELAB)
 
@@ -1968,3 +1971,77 @@ ggsave("output/wcs_hapax.pdf", width=5.6, height=3.8)
 ts_ttr = rbind(ts_ttr, select(WCS_ttr, ttr, hapax_rate) %>% mutate(baseline=F))
 
 # TODO analyze with mean number of terms per subject / total terms with freq 2
+
+# Second round of lexical diversity stuff ------------------------
+
+# 1. Lexical-overlap score:  calculate a number for each subject as follows: for the words spoken by this subject, the % of terms that were given at least once by 1/2 of the subjects (or maybe 3/4? some high threshold) average this number across subjects to get a lexical-overlap score for a language.  
+# for the fixed task, we should get close to 1 here: subjects are choosing words that everyone else is also choosing. for the open task, we will get a much lower number: subjects are choosing words that few others are choosing.
+
+# 2. Lexical-one-off (hapax) score:  calculate a number for each subject as follows: for the words spoken by this subject, the % of terms that were given by no other subjects (or maybe one other) average this number across subjects to get a one-off / hapax score for a language.  
+
+PROP_THRESHOLD = 3/4
+
+# TODO join tsimane' into this before the pipeline
+# TODO conversion and filtering
+
+WCS_with_subjects = answers_Y %>%
+    rename(Experiment=Lang_Name,
+	   color=Term,
+	   grid_location=FielConcat,
+	   subject=Subject) %>%
+    select(Experiment, color, grid_location, subject) %>%	   
+    mutate(WCS=T) %>%
+    rbind(
+      ColorData %>%
+          filter(Experiment %in% c("Tsimane_Fixed", "Tsimane_Open")) %>%
+	  mutate(WCS=F) %>%
+	  select(Experiment, color, grid_location, subject, WCS))
+
+WCS_diversity = WCS_with_subjects %>%
+    group_by(Experiment, color) %>%
+        mutate(num_subjects_using=length(unique(subject))) %>%
+    	ungroup() %>%
+    group_by(Experiment) %>%
+        mutate(num_subjects=length(unique(subject))) %>%
+	ungroup() %>%
+    mutate(subj_hapax=num_subjects_using == 1,
+           prop_subjects_using=num_subjects_using/num_subjects,
+           over_threshold=prop_subjects_using > PROP_THRESHOLD) %>%
+    group_by(Experiment, subject) %>%
+        summarise(prop_over_threshold = mean(over_threshold),
+               	  prop_subj_hapax = mean(subj_hapax)) %>%
+        ungroup() %>%
+    group_by(Experiment) %>%
+        summarise(mean_prop_over_threshold=mean(prop_over_threshold),
+	          mean_prop_subj_hapax=mean(prop_subj_hapax)) %>%
+        ungroup() %>%
+    mutate(WCS=!(Experiment %in% c("Tsimane_Open", "Tsimane_Fixed")))
+
+ts_diversity_open = filter(WCS_diversity, Experiment == "Tsimane_Open")
+ts_diversity_fixed = filter(WCS_diversity, Experiment == "Tsimane_Fixed")
+
+WCS_diversity %>%
+    filter(WCS) %>%	     
+    ggplot(aes(x=mean_prop_over_threshold)) +
+        geom_histogram() +
+	xlab("Mean proportion of common color words by subject") +
+    	ylab("Number of languages") +
+	geom_vline(color="red",
+	           aes(xintercept=mean(ts_diversity_open$mean_prop_over_threshold))) +
+	geom_vline(color="blue",
+	           aes(xintercept=mean(ts_diversity_fixed$mean_prop_over_threshold)))
+
+ggsave("output/wcs_propcommon.pdf", width=5.6, height=3.8)
+
+WCS_diversity %>%
+    filter(WCS) %>%
+    ggplot(aes(x=mean_prop_subj_hapax)) +
+        geom_histogram() +
+        xlab("Mean proportion of one-off color words by subject") +
+        ylab("Number of languages") +
+        geom_vline(color="red",
+                   aes(xintercept=mean(ts_diversity_open$mean_prop_subj_hapax))) +
+        geom_vline(color="blue",
+                   aes(xintercept=mean(ts_diversity_fixed$mean_prop_subj_hapax)))
+
+ggsave("output/wcs_proponeoff.pdf", width=5.6, height=3.8)
