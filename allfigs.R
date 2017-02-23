@@ -1894,7 +1894,8 @@ for(i in 1:NUM_SAMPLES) {
     filter(ok) %>%
     group_by(color) %>%
       mutate(num_color_tokens=n()) %>%
-      ungroup() %>%
+      ungroup() -> d2
+  d2 %>%
     summarise(num_tokens=length(color),
               num_types=length(unique(color)),
 	      ttr=num_types/num_tokens,
@@ -1908,7 +1909,9 @@ d_ttr
 }
 
 ts_ttr = ColorData %>% filter(Experiment == "Tsimane_Open") %>% get_ttr()
-ts_ttr_fixed = ColorData %>% filter(Experiment == "Tsimane_Fixed") %>% get_ttr()
+ts_ttr_fixed = ColorData %>%
+  filter(Experiment == "Tsimane_Fixed", color != 19) %>% # weird erroneous one-off
+  get_ttr()
 
 answers %>%
   group_by(Lang_Name) %>%
@@ -1955,7 +1958,7 @@ ggsave("output/wcs_ttr.pdf", width=5.6, height=3.8)
 WCS_ttr %>%
   ggplot(aes(x=hapax_rate)) +
     geom_histogram(bins=50) +
-    xlab("Hapax rate") +
+    xlab("One-off rate") +
     ylab("Number of languages") +
     geom_vline(color="red", aes(xintercept=mean(ts_ttr$hapax_rate))) +
     geom_vline(color="blue", aes(xintercept=mean(ts_ttr_fixed$hapax_rate)))    
@@ -1964,23 +1967,4 @@ ggsave("output/wcs_hapax.pdf", width=5.6, height=3.8)
 
 ts_ttr = rbind(ts_ttr, select(WCS_ttr, ttr, hapax_rate) %>% mutate(baseline=F))
 
-ts_ttr %>%
-  ggplot(aes(x=ttr, fill=baseline)) +
-    geom_histogram(aes(y=..ncount..), bins=50) +
-    ylab("Number of languages") +
-    xlab("Type/token ratio")
-
-ggsave("output/wcs_ttr_with_baseline.pdf", width=5.6, height=3.8)
-
-ts_ttr %>%
-  ggplot(aes(x=hapax_rate, fill=baseline)) +
-    geom_histogram(aes(y=..ncount..), bins=50, alpha=.7, position="identity") +
-    ylab("Number of languages") +
-    xlab("Hapax rate")
-
-ggsave("output/wcs_hapax_with_baseline.pdf", width=5.6, height=3.8)
-
-
-    	      
-    
-  
+# TODO analyze with mean number of terms per subject / total terms with freq 2
