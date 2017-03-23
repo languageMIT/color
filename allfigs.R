@@ -262,8 +262,8 @@ ColorData %>%
   mutate(color=as.character(color)) %>%
   group_by(Language) %>%
     mutate(color=ifelse(Language == "Tsimane",
-                        TSIMANE_COLORS[as.numeric(color)],
-    		        ENGLISH_COLORS[as.numeric(color)])) %>%
+                        TSIMANE_COLORS[as.numeric(as.character(color))],
+    		        ENGLISH_COLORS[as.numeric(as.character(color))])) %>%
     ungroup() %>%		      
   filter(!is.na(color)) %>%
   filter(color %in% focal_locations$term) %>%
@@ -1911,6 +1911,53 @@ d_ttr = data.frame(ttr=ttrs, hapax_rate=hapaxes, baseline=T)
 d_ttr
 }
 
+max_sample = function(f, xs, num_samples, num_attempts) {
+  samples = c()
+  scores = c()
+  for(i in 1:num_attempts) {
+     the_sample = sample(xs, num_samples)
+     samples = c(samples, the_sample)
+     scores = c(scores, f(the_sample))
+  }
+  start = (which.max(scores) - 1) * num_samples + 1
+  end = start + num_samples - 1
+  samples[start:end]
+}
+
+assert(
+  mean(replicate(100, sum(sample(1:50, 10)))) <
+  mean(replicate(100, sum(max_sample(sum, 1:50, 10, 10))))
+)
+
+uniformity_criterion = function(xs) {
+  mean(gap_size(xs)^2)		    
+}
+
+gap_size = function(numbers) {
+  xs = numbers[order(numbers)]
+  n = length(xs)
+  xs[2:n] - xs[1:(n-1)]
+}
+
+mysample = function(xs, num_samples) {
+  max_sample(uniformity_criterion, xs, num_samples, 10)
+}
+
+ColorDataFiltered = ColorData %>%
+  group_by(Experiment) %>%
+    select(subject) %>%
+    unique() %>%
+    mutate(ok=as.numeric(as.factor(subject)) %in% mysample(1:n(), Y)) %>%
+    ungroup() %>%
+  inner_join(ColorData) %>%
+  filter(ok)
+
+assert(ColorDataFiltered %>%
+  group_by(Experiment) %>%
+    summarise(s=length(unique(subject))) %>%
+    select(s) %>%
+    unique() == Y)
+
 ts_ttr = ColorData %>% filter(Experiment == "Tsimane_Open") %>% get_ttr()
 ts_ttr_fixed = ColorData %>%
   filter(Experiment == "Tsimane_Fixed", color != 19) %>% # weird erroneous one-off
@@ -1952,7 +1999,7 @@ WCS_ttr %>%
   ggplot(aes(x=ttr)) +
     geom_histogram(bins=50) +
     xlab("Type-Token Ratio") +
-    ylab("Number of languages") +
+    ylab("Languages") +
     geom_vline(color="red", aes(xintercept=mean(ts_ttr$ttr))) +
     geom_vline(color="blue", aes(xintercept=mean(ts_ttr_fixed$ttr)))
 
@@ -1962,7 +2009,7 @@ WCS_ttr %>%
   ggplot(aes(x=hapax_rate)) +
     geom_histogram(bins=50) +
     xlab("One-off rate") +
-    ylab("Number of languages") +
+    ylab("Languages") +
     geom_vline(color="red", aes(xintercept=mean(ts_ttr$hapax_rate))) +
     geom_vline(color="blue", aes(xintercept=mean(ts_ttr_fixed$hapax_rate)))    
 
@@ -1981,9 +2028,6 @@ ts_ttr = rbind(ts_ttr, select(WCS_ttr, ttr, hapax_rate) %>% mutate(baseline=F))
 
 PROP_THRESHOLD = 3/4
 
-# TODO join tsimane' into this before the pipeline
-# TODO conversion and filtering
-
 WCS_with_subjects = answers_Y %>%
     rename(Experiment=Lang_Name,
 	   color=Term,
@@ -1992,56 +2036,260 @@ WCS_with_subjects = answers_Y %>%
     select(Experiment, color, grid_location, subject) %>%	   
     mutate(WCS=T) %>%
     rbind(
-      ColorData %>%
-          filter(Experiment %in% c("Tsimane_Fixed", "Tsimane_Open")) %>%
+      ColorDataFiltered %>%
 	  mutate(WCS=F) %>%
 	  select(Experiment, color, grid_location, subject, WCS))
+
+NUM_TERMS_CUTOFF = 5 # need more than this many instances of a term for it to count
 
 WCS_diversity = WCS_with_subjects %>%
     group_by(Experiment, color) %>%
         mutate(num_subjects_using=length(unique(subject))) %>%
     	ungroup() %>%
     group_by(Experiment) %>%
-        mutate(num_subjects=length(unique(subject))) %>%
+        mutate(num_subjects=length(unique(subject)),
+	       num_terms=sum(tabulate(color) > NUM_TERMS_CUTOFF)) %>%
 	ungroup() %>%
     mutate(subj_hapax=num_subjects_using == 1,
            prop_subjects_using=num_subjects_using/num_subjects,
            over_threshold=prop_subjects_using > PROP_THRESHOLD) %>%
     group_by(Experiment, subject) %>%
-        summarise(prop_over_threshold = mean(over_threshold),
+        summarise(num_terms=first(num_terms),
+		  prop_over_threshold = mean(over_threshold),
                	  prop_subj_hapax = mean(subj_hapax)) %>%
         ungroup() %>%
     group_by(Experiment) %>%
-        summarise(mean_prop_over_threshold=mean(prop_over_threshold),
+        summarise(num_terms=first(num_terms),
+		  mean_prop_over_threshold=mean(prop_over_threshold),
 	          mean_prop_subj_hapax=mean(prop_subj_hapax)) %>%
         ungroup() %>%
-    mutate(WCS=!(Experiment %in% c("Tsimane_Open", "Tsimane_Fixed")))
+    mutate(WCS=!(Experiment %in% c("Tsimane_Open",
+    			    	   "Tsimane_Fixed",
+				   "English_Open",
+				   "English_Fixed",
+				   "Spanish_Open",
+				   "Spanish_Fixed")))
 
 ts_diversity_open = filter(WCS_diversity, Experiment == "Tsimane_Open")
 ts_diversity_fixed = filter(WCS_diversity, Experiment == "Tsimane_Fixed")
 
-WCS_diversity %>%
-    filter(WCS) %>%	     
-    ggplot(aes(x=mean_prop_over_threshold)) +
-        geom_histogram() +
-	xlab("Mean proportion of common color words by subject") +
-    	ylab("Number of languages") +
-	geom_vline(color="red",
-	           aes(xintercept=mean(ts_diversity_open$mean_prop_over_threshold))) +
-	geom_vline(color="blue",
-	           aes(xintercept=mean(ts_diversity_fixed$mean_prop_over_threshold)))
+WCS_diversity[WCS_diversity$Experiment == "Tsimane_Fixed",]$num_terms = 8
 
-ggsave("output/wcs_propcommon.pdf", width=5.6, height=3.8)
+gg_color_hues <- function(n) {
+   hues = seq(15, 375, length=n+1)
+   hcl(h=hues, l=65, c=100)[1:n]
+}
+
+hues = gg_color_hues(6)
+hues = c("red", "darkred", "green", "darkgreen", "cyan", "darkcyan", "darkgrey")
+
+WCS_diversity %>%
+    mutate(WCS=ifelse(WCS, "WCS", as.character(Experiment))) %>%
+    ggplot(aes(x=mean_prop_over_threshold, fill=WCS)) +
+        geom_histogram() +
+	xlab("Mean color-word-overlap proportion") +
+    	ylab("Languages") +
+	theme(legend.title=element_blank()) +
+	scale_fill_manual(values=hues,
+	                  labels=c("English fixed choice",
+	                           "English free choice",
+				   "Spanish fixed choice",
+				   "Spanish free choice",
+				   "Tsimane' fixed choice",
+				   "Tsimane' free choice",
+				   "WCS"))                            				      
+
+ggsave("output/wcs_propcommon.pdf", width=6, height=4)
 
 WCS_diversity %>%
     filter(WCS) %>%
     ggplot(aes(x=mean_prop_subj_hapax)) +
         geom_histogram() +
         xlab("Mean proportion of one-off color words by subject") +
-        ylab("Number of languages") +
+        ylab("Languages") +
         geom_vline(color="red",
                    aes(xintercept=mean(ts_diversity_open$mean_prop_subj_hapax))) +
         geom_vline(color="blue",
                    aes(xintercept=mean(ts_diversity_fixed$mean_prop_subj_hapax)))
 
 ggsave("output/wcs_proponeoff.pdf", width=5.6, height=3.8)
+
+WCS_diversity %>%
+    filter(WCS) %>%
+    ggplot(aes(x=num_terms)) +
+        geom_histogram() +
+        xlab("Total number of terms used") +
+        ylab("Languages") +
+        geom_vline(color="red",
+                   aes(xintercept=mean(ts_diversity_open$num_terms))) +
+        geom_vline(color="blue",
+                   aes(xintercept=mean(ts_diversity_fixed$num_terms)))
+
+WCS_diversity %>%
+  mutate(WCS=ifelse(WCS, "WCS", as.character(Experiment))) %>%
+  group_by(WCS, num_terms) %>%
+    summarise(count=n()) %>%
+    ungroup() %>%
+  ggplot(aes(x=num_terms, y=count, fill=WCS)) +
+    geom_bar(stat="identity", position="stack") +
+    xlab("Total terms") +
+    ylab("Languages") +
+    theme(legend.title=element_blank(),
+          legend.position="bottom")
+    
+ggsave("output/wcs_num_terms.pdf", width=5.6, height=3.8)
+
+
+
+
+
+# Spanish knowledge demographics --------------------------
+
+ColorDataWithDemographics %>%
+  select(Subject, Spanish) %>%
+  unique() %>%
+  summarise(m=mean(Spanish, na.rm=T),
+            num_perfect=sum(Spanish == 11, na.rm=T),
+	    tot=sum(!is.na(Spanish))) %>%
+  write.csv("output/spanish_knowledge_summary.csv")
+
+# Situating Tsimane' in the WCS ---------------------------
+
+d_to_plot %>%
+  mutate(WCS=ifelse(Language %in% c("English", "Spanish", "Tsimane"),
+                    as.character(Language),
+		    "WCS")) %>%
+  select(Language, lang_score, WCS) %>%
+  unique() %>%
+  ggplot(aes(x=lang_score/80, fill=WCS)) +
+    geom_histogram() + 
+    xlab("Conditional entropy") +
+    ylab("Number of languages") +
+    theme(legend.title=element_blank())
+
+ggsave("output/wcs_conditional_entropy.pdf", width=5.6, height=3.8)
+
+Mode <- function(x) {
+  ux <- unique(x)
+  ux[which.max(tabulate(match(x, ux)))]
+}
+
+WCS %>%
+  group_by(Experiment, grid_location) %>%
+    summarise(modal_term=Mode(color)) %>%
+    ungroup() %>%
+  group_by(Experiment) %>%
+    summarise(num_modal_terms=length(unique(modal_term))) %>%
+    ungroup() %>%
+  mutate(Experiment=as.character(Experiment)) %>%    
+  mutate(WCS="WCS") -> WCS_modal
+
+ColorData %>%
+  select(Experiment, grid_location, color) %>%
+  group_by(Experiment, grid_location) %>%
+    summarise(modal_term=Mode(color)) %>%
+    ungroup() %>%
+  group_by(Experiment) %>%
+    summarise(num_modal_terms=length(unique(modal_term))) %>%
+    ungroup() %>%
+  filter(Experiment %in% c("English_Open",
+                           "Spanish_Open",
+			   "Tsimane_Open",
+			   "English_Fixed",
+			   "Spanish_Fixed",
+			   "Tsimane_Fixed")) %>%
+  mutate(WCS=as.character(Experiment)) -> our_modal
+
+modal = rbind(WCS_modal, our_modal)
+
+max_modal = max(modal$num_modal_terms)
+
+modal %>%
+  group_by(WCS, num_modal_terms) %>%
+    summarise(count=n()) %>%
+    ungroup() %>%
+  mutate(num_modal_terms=factor(num_modal_terms)) %>%    
+  ggplot(aes(x=num_modal_terms, y=count, fill=WCS)) +
+    geom_bar(stat="identity", position="stack") +
+    xlab("Number of modal terms") +
+    ylab("Number of languages") +
+    theme(legend.title=element_blank()) 
+
+ggsave("output/wcs_num_modal.pdf", width=5.6, height=3.8)
+
+modeprop = function(x) {
+  ux = unique(x)
+  Z = length(x)
+  top = max(tabulate(match(x, ux)))
+  top / Z
+}
+
+# subject 18 in EO is weird
+
+modeprops = ColorData %>%
+  select(Experiment, color, grid_location) %>%
+  group_by(Experiment, grid_location) %>%
+    summarise(mode=as.numeric(as.character(Mode(color))),
+              modeprop=modeprop(color)) %>%
+    ungroup() %>%
+    mutate(mode=ifelse(str_detect(Experiment, "Tsimane"),
+                       TSIMANE_COLORS[mode],
+		       ENGLISH_COLORS[mode]))
+		       
+modeprops %>% write.csv("output/modeprops.csv")
+
+ColorData %>%
+  select(Experiment, color, grid_location) %>%
+  group_by(Experiment, grid_location) %>%
+    summarise(mode=modeprop(color)) %>%
+    ungroup() %>%
+  group_by(Experiment) %>%
+    summarise(m=mean(mode)) %>%
+    ungroup() %>%
+    print()
+
+ChipEntropies %>%
+  unite(Experiment, Language, Type, sep="_") %>%
+  select(Experiment, grid_location, Entropy) %>%
+  rbind(WCS_ChipEntropies %>% select(-Prior)) %>%
+  inner_join(WCS_diversity) %>%
+  mutate(WCS=ifelse(WCS, "WCS", as.character(Experiment))) %>%
+  group_by(Experiment, WCS) %>%
+    summarise(ratio=first(num_terms/(sum(Entropy)/80))) %>%
+    ungroup() %>%
+  ggplot(aes(x=ratio, fill=WCS)) +
+    geom_histogram() +
+    xlab("Number of terms / Conditional entropy") +
+    ylab("Languages") +
+    theme(legend.title=element_blank()) +
+    scale_fill_discrete(labels=c("Tsimane' fixed choice", "Tsimane' free choice", "WCS"))
+
+ggsave("output/wcs_term_condent_ratio.pdf", width=6, height=4)
+
+WCS_diversity2 = WCS_diversity %>%
+  select(-WCS) %>%
+  inner_join(modal)
+
+WCS_diversity2 %>%
+  group_by(Experiment, WCS) %>%
+    summarise(ratio=num_terms/num_modal_terms) %>%
+    ungroup() %>%
+  ggplot(aes(x=ratio, fill=WCS)) +
+    geom_histogram() +
+    xlab("Terms / Modal Terms") +
+    ylab("Languages") +
+    theme(legend.title=element_blank()) +
+    scale_fill_manual(values=hues,
+	              labels=c("English fixed choice",
+	                       "English free choice",
+			       "Spanish fixed choice",
+			       "Spanish free choice",
+			       "Tsimane' fixed choice",
+			       "Tsimane' free choice",
+			       "WCS"))                            		
+
+ggsave("output/wcs_terms_over_modal_terms.pdf", width=6, height=4)
+
+
+
+
