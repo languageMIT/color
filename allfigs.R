@@ -18,6 +18,10 @@ library(lme4)
 # spearman correlatios of average surprisal across en es ts
 # education correlations
 
+Mode <- function(x) {
+  ux <- unique(x)
+  ux[which.max(tabulate(match(x, ux)))]
+}
 
 # We've determined the Julian-style data contains duplicated subjects so we should
 # use the Kyle-style data. (Meeting on 2016-06-02.)
@@ -521,7 +525,7 @@ answers<-tbl_df(merge(languages,answers,by="Lang_Id"))
 
 # Keep only what you need
 WCS = answers %>%
-  select(Lang_Name, FielConcat, Term) %>%
+  select(Lang_Name, FielConcat, Term, Subject) %>%
   rename(Language=Lang_Name, Chip=FielConcat, Color=Term)
 
 WCS$Color<-as.character(WCS$Color)
@@ -530,8 +534,11 @@ WCS[which(is.na(WCS$Color)),]$Color="NA"
 
 
 #Standardize with main dataset
-names(WCS)<-c("Experiment","grid_location","color")
+names(WCS)<-c("Experiment","grid_location","color", "subject")
 WCS$grid_location<-as.character(WCS$grid_location)
+
+WCS_with_subjects = WCS
+WCS = select(WCS, -subject)
 
 # Reduce WCS chips to those in our other analyses -------------------------------------
 # Load code conversion chart
@@ -558,8 +565,6 @@ WCS <- inner_join(WCS,
 WCS %>% dplyr::group_by(Experiment) %>% dplyr::summarise(Chips=length(unique(grid_location))) %>%
   dplyr::select(Chips) %>% table # good!
   
-rm(ConversionChart)
-
 if (RESTRICT_COOL) {
    WCS %>%
      mutate(rc=CodeToRowColumn(grid_location)) %>%
@@ -1745,7 +1750,8 @@ GetPoolCount<-function(CurrDat){
 ColorData = ColorData %>%
   mutate(rc=CodeToRowColumn(grid_location)) %>%
   separate(rc, into=c("row", "column"), sep="_") %>%
-  mutate(row=-as.numeric(row), column=as.numeric(column))
+  mutate(row=-as.numeric(row), column=as.numeric(column)) %>%
+  filter(!(Experiment == "Tsimane_Fixed" & color == 19)) # get rid of noncompliant subject
 
 ColorData$Id = paste(ColorData$Experiment,ColorData$subject)
 
@@ -1967,9 +1973,9 @@ answers %>%
   group_by(Lang_Name) %>%
     mutate(s=length(unique(Subject)), ok=s >= Y) %>%
     ungroup() %>%
-  filter(ok) -> answers
+  filter(ok) -> answers_filtered
 
-answers %>%
+answers_filtered %>%
   select(Lang_Name, Subject, s) %>%
   unique() %>%
   group_by(Lang_Name) %>%
@@ -2028,7 +2034,7 @@ ts_ttr = rbind(ts_ttr, select(WCS_ttr, ttr, hapax_rate) %>% mutate(baseline=F))
 
 PROP_THRESHOLD = 3/4
 
-WCS_with_subjects = answers_Y %>%
+WCS_with_subjects_restr = answers_Y %>%
     rename(Experiment=Lang_Name,
 	   color=Term,
 	   grid_location=FielConcat,
@@ -2040,26 +2046,50 @@ WCS_with_subjects = answers_Y %>%
 	  mutate(WCS=F) %>%
 	  select(Experiment, color, grid_location, subject, WCS))
 
+WCS_with_subjects_full = answers %>%
+    rename(Experiment=Lang_Name,
+	   color=Term,
+	   grid_location=FielConcat,
+	   subject=Subject) %>%
+    select(Experiment, color, grid_location, subject) %>%	   
+    mutate(WCS=T) %>%
+    rbind(
+      ColorData %>%
+	  mutate(WCS=F) %>%
+	  select(Experiment, color, grid_location, subject, WCS))
+
 NUM_TERMS_CUTOFF = 5 # need more than this many instances of a term for it to count
 
-WCS_diversity = WCS_with_subjects %>%
+make_diversity = function(WCS_with_subjects) {
+WCS_with_subjects %>%
     group_by(Experiment, color) %>%
         mutate(num_subjects_using=length(unique(subject))) %>%
     	ungroup() %>%
+    group_by(Experiment, grid_location) %>%
+        mutate(modal_term=Mode(color)) %>%
+        ungroup() %>%
     group_by(Experiment) %>%
-        mutate(num_subjects=length(unique(subject)),
+        mutate(num_modal_terms=length(unique(modal_term))) %>%
+        ungroup() %>%	
+    group_by(Experiment) %>%
+        mutate(full_num_terms=sum(tabulate(color) > 0),
+	       num_subjects=length(unique(subject)),
 	       num_terms=sum(tabulate(color) > NUM_TERMS_CUTOFF)) %>%
 	ungroup() %>%
     mutate(subj_hapax=num_subjects_using == 1,
            prop_subjects_using=num_subjects_using/num_subjects,
            over_threshold=prop_subjects_using > PROP_THRESHOLD) %>%
     group_by(Experiment, subject) %>%
-        summarise(num_terms=first(num_terms),
+        summarise(num_modal_terms=first(num_modal_terms),
+	          num_terms=first(num_terms),
+		  full_num_terms=first(full_num_terms),
 		  prop_over_threshold = mean(over_threshold),
                	  prop_subj_hapax = mean(subj_hapax)) %>%
         ungroup() %>%
     group_by(Experiment) %>%
-        summarise(num_terms=first(num_terms),
+        summarise(num_modal_terms=first(num_modal_terms),
+	          num_terms=first(num_terms),
+	          full_num_terms=first(full_num_terms),
 		  mean_prop_over_threshold=mean(prop_over_threshold),
 	          mean_prop_subj_hapax=mean(prop_subj_hapax)) %>%
         ungroup() %>%
@@ -2069,6 +2099,11 @@ WCS_diversity = WCS_with_subjects %>%
 				   "English_Fixed",
 				   "Spanish_Open",
 				   "Spanish_Fixed")))
+				   }
+
+WCS_diversity = make_diversity(WCS_with_subjects_restr)
+WCS_diversity_full = make_diversity(WCS_with_subjects_full)
+
 
 ts_diversity_open = filter(WCS_diversity, Experiment == "Tsimane_Open")
 ts_diversity_fixed = filter(WCS_diversity, Experiment == "Tsimane_Fixed")
@@ -2169,10 +2204,6 @@ d_to_plot %>%
 
 ggsave("output/wcs_conditional_entropy.pdf", width=5.6, height=3.8)
 
-Mode <- function(x) {
-  ux <- unique(x)
-  ux[which.max(tabulate(match(x, ux)))]
-}
 
 WCS %>%
   group_by(Experiment, grid_location) %>%
@@ -2184,7 +2215,7 @@ WCS %>%
   mutate(Experiment=as.character(Experiment)) %>%    
   mutate(WCS="WCS") -> WCS_modal
 
-ColorData %>%
+ColorDataFiltered %>%
   select(Experiment, grid_location, color) %>%
   group_by(Experiment, grid_location) %>%
     summarise(modal_term=Mode(color)) %>%
@@ -2226,7 +2257,7 @@ modeprop = function(x) {
 
 # subject 18 in EO is weird
 
-modeprops = ColorData %>%
+modeprops = ColorDataFiltered %>%
   select(Experiment, color, grid_location) %>%
   group_by(Experiment, grid_location) %>%
     summarise(mode=as.numeric(as.character(Mode(color))),
@@ -2238,7 +2269,7 @@ modeprops = ColorData %>%
 		       
 modeprops %>% write.csv("output/modeprops.csv")
 
-ColorData %>%
+ColorDataFiltered %>%
   select(Experiment, color, grid_location) %>%
   group_by(Experiment, grid_location) %>%
     summarise(mode=modeprop(color)) %>%
@@ -2290,6 +2321,138 @@ WCS_diversity2 %>%
 
 ggsave("output/wcs_terms_over_modal_terms.pdf", width=6, height=4)
 
+AllColorData = ColorData %>%
+  select(Experiment, subject, grid_location, color) %>%
+  rbind(WCS_with_subjects)
+
+AllChipEntropies = ChipEntropies %>%
+  unite(Experiment, Language, Type, sep="_") %>%
+  select(Experiment, grid_location, Entropy, Prior) %>%
+  rbind(WCS_ChipEntropies)
+
+LangEntropies = AllChipEntropies %>%
+  group_by(Experiment) %>%
+    summarise(CondEnt=sum(Entropy * Prior)) %>%
+    ungroup()
+
+# Bootstrap the diversity measures ----------------------------
+
+# bootstrap the Tsimane' fixed choice terms/modal_terms ratio to show that
+# other languages with the same total number of terms are not from the same distribution,
+# nor are other languages with the same total number of modal terms.
+
+# resample subjects for Tsimane' fixed and free
+# then do make_diversity
+# then calculate ratios
+# then look at WCS ratios and compare to the set of bootstrapped ratios
+
+bootstrap_by_subject = function(d, f, num_samples, num_resamples) {
+  subjects = unique(d$subject)
+  if (is.na(num_resamples)) {
+    num_resamples = length(subjects)
+  }
+  result = data.frame()
+  for(i in 1:num_samples) {
+    sub_subjects = sample(subjects, size=num_resamples, replace=F)
+    subresult = data.frame()
+    for(sub_subject in sub_subjects) {
+      subresult = rbind(subresult, filter(d, subject == sub_subject))
+    }
+    result = rbind(result, f(subresult))
+  }
+  result
+}
+
+ts_fixed_boot_diversity = WCS_with_subjects_full %>%
+  filter(Experiment == "Tsimane_Fixed") %>%
+  bootstrap_by_subject(make_diversity, 10, NA)
+
+ts_open_boot_diversity = WCS_with_subjects_full %>%
+  filter(Experiment == "Tsimane_Open") %>%
+  bootstrap_by_subject(make_diversity, 100, NA)
+
+fixed_ratios = with(ts_fixed_boot_diversity, num_terms / num_modal_terms)
+open_ratios  = with(ts_open_boot_diversity, num_terms / num_modal_terms) 
+
+WCS_diversity_full %>%
+  filter(WCS) %>%
+  mutate(ratio=num_terms/num_modal_terms,
+         less=ratio<min(open_ratios),
+	 more=ratio>max(open_ratios),
+	 significant = less | more) %>%
+  select(Experiment, ratio, significant) %>%
+  write.csv("output/ratio_significance.csv")
+
+WCS_diversity_full %>%
+  filter(WCS) %>%
+  filter(num_modal_terms == 8) %>%
+  mutate(ratio=num_terms/num_modal_terms,
+         less=ratio<min(open_ratios),
+	 more=ratio>max(open_ratios),
+	 significant=less | more) %>%
+  select(Experiment, ratio, significant) 
 
 
+
+
+
+
+
+
+# WCS Uncertainty Plots -------------------------------
+
+circle_small_filled=20
+circle_filled=16
+circle_empty=1
+square_filled=15
+square_empty=0
+
+color_white="#FFFFFF"
+color_gray0="#DEDEDE"
+color_gray1="#B3B3B3"
+color_gray2="#808080"
+color_gray3="#363636"
+color_black="#000000"
+color_spanish="#A9A9A9"
+color_english="#D3D3D3"
+
+GeneratePlot<-function(data, method){
+  # Shape order on data: Fixed, Open.
+  # Color order on data: English, Spanish, Tsimane', WCS
+  # Bevil's tones: WCS white, English light grey, Spanish dark grey, Tsimane black
+  smallsize=3
+  largesize=5
+  if (method=="log2"){
+    temp<-mutate(data,xcolors=log2(colors))
+  }
+  if (method=="log"){
+    temp<-mutate(data,xcolors=log(colors))
+  }
+  if (method=="linear"){
+    temp<-mutate(data,xcolors=colors)
+  }
+  max_x = ceiling(max(data$Uncertainty))
+  max_y = ceiling(log(max(data$colors)))
+  temp %>% ggplot(aes(x=xcolors,y=Uncertainty,shape=Method,color=Language,size=Type))+
+    geom_point()+
+    geom_point(shape = 1,size = smallsize,colour = "black")+
+    theme_bw()+
+    scale_shape_manual(values=c(circle_filled,square_filled))+
+    scale_size_manual(values=c(largesize,smallsize))+
+    scale_colour_manual(values=c(color_english,color_spanish,color_black,color_white))+
+    scale_x_continuous("")+
+    scale_y_continuous("",limit=c(3.5,6),breaks=c(3.5,4,4.5,5,5.5,6))+
+    theme(panel.border = element_blank(),axis.line = element_line(colour="black"),
+          panel.grid.major = element_blank(),panel.grid.minor = element_blank())   
+}
+
+LangEntropies %>%
+  inner_join(select(WCS_diversity_full, Experiment, full_num_terms)) %>%
+  separate(Experiment, into=c("Language", "Method"), sep="_") %>%
+  mutate(Type=ifelse(is.na(Method), "WCS", "Non-WCS")) %>%
+  rename(Uncertainty=CondEnt, colors=full_num_terms) %>%
+  mutate(Language = ifelse(Language %in% c("English", "Spanish", "Tsimane"), Language, "WCS")) %>%
+  GeneratePlot("log2")
+
+ggsave("output/uncertainty.pdf", height=4, width=6)
 
