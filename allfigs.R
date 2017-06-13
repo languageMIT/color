@@ -41,6 +41,8 @@ FORBIDDEN_COLS = c(7, 9, 11, 13, 15)
 RESTRICT_FOCAL = F
 PRIOR = "Uniform" # "Uniform", "Foreground", "Background", ...
 RESTRICT_CIELAB = F
+BLACK_WHITE = T
+INTERPOLATE_ENTROPY = T
 
 get_mode <- function(x) {
   ux <- unique(x)
@@ -189,6 +191,26 @@ m = read.csv("Munsell_WCS_codes.csv") %>%
 	 WCSCode=WCS)
 
 
+## Add black/white ---------------------------------------
+## For the color naming task, everyone answered consistently for white/black.
+## Add this data in two new dummy grid locations: I1 (black), I2 (white)
+BLACK_LOCATION = "I1"
+WHITE_LOCATION = "I2"
+
+Black = ColorData %>%
+    group_by(subject, Experiment) %>%
+    summarise(color="1", grid_location=BLACK_LOCATION) %>%
+    ungroup()
+
+White = ColorData %>%
+    group_by(subject, Experiment) %>%
+    summarise(color="2", grid_location=WHITE_LOCATION) %>%
+    ungroup()
+
+if (BLACK_WHITE) {
+    ColorData = ColorData %>% bind_rows(Black, White)
+}
+
 # Load focal location data ----------------------------
 
 d5 = read.csv("Tsimane2015_2_focal_colors_object_colors.csv", stringsAsFactors=F)
@@ -256,6 +278,22 @@ focal_chips = focal_locations %>%
   group_by(Language, term) %>%
     summarise(Code=get_mode(Code)) %>%
     ungroup() 
+
+if (BLACK_WHITE) {
+  focal_b = focal_chips %>%
+    group_by(Language) %>%
+    summarise(term="1", Code="I1") %>%
+    ungroup()
+  
+  
+  focal_w = focal_chips %>%
+    group_by(Language) %>%
+    summarise(term="2", Code="I2") %>%
+    ungroup()
+  
+  focal_chips = focal_chips %>%
+    rbind(focal_b, focal_w)
+}
 
 # For each focal term, how many subjects know that term?
 # first need to convert the color indices in ColorData into terms
@@ -554,13 +592,13 @@ WCS <- filter(WCS,grid_location %in% unique(ConversionChart$grid_location))
 answers_bak = answers
 answers <- filter(answers, FielConcat %in% unique(ConversionChart$grid_location))
 
-assert(length(unique(WCS$grid_location)) == 80 | RESTRICT_COOL | RESTRICT_FOCAL| RESTRICT_CIELAB)
+assert(length(unique(WCS$grid_location)) == 80 | RESTRICT_COOL | RESTRICT_FOCAL| RESTRICT_CIELAB | BLACK_WHITE)
 
 WCS <- inner_join(WCS,
                   ConversionChart,
 		  by=c("grid_location")) %>%
-         dplyr::select(-MainCode,-grid_location) %>%
-	 dplyr::rename(grid_location=BoliviaCode)
+         select(-MainCode,-grid_location) %>%
+	 rename(grid_location=BoliviaCode)
 	 
 WCS %>% dplyr::group_by(Experiment) %>% dplyr::summarise(Chips=length(unique(grid_location))) %>%
   dplyr::select(Chips) %>% table # good!
@@ -615,7 +653,7 @@ WCS_ChipEntropies = ComputeConditionalEntropy(WCS)
 
 write.csv(WCS_ChipEntropies, "output/Latest_WCS_ChipEntropies.csv")
 
-ChipEntropies %>%
+All_ChipEntropies = ChipEntropies %>%
   filter(Type == "Open") %>%
   select(Language, grid_location, Entropy) %>%
   rbind(WCS_ChipEntropies %>%
@@ -623,8 +661,88 @@ ChipEntropies %>%
 	select(Language, grid_location, Entropy)) %>%
   spread(Language, Entropy) %>%
   inner_join(m) %>%
-  rename(OurCode=grid_location) %>%
+  rename(OurCode=grid_location)
+
+All_ChipEntropies %>%
   write.csv("output/Latest_All_ChipEntropies.csv")
+
+tap = function(x){
+  print(x)
+  return(x)
+}
+
+interpolate_entropy = function(entropy, row, column) {
+  d = data.frame(entropy, row, column)
+  names(d) = c("entropy", "row", "column")
+  d$interpolated_entropy = d$entropy
+  for(i in 1:nrow(d)) {
+    if(is.na(d[i,]$entropy)) {
+      row = d[i,]$row
+      column = d[i,]$column
+      below = d$row==row+1 & d$column==column
+      above = d$row==row-1 & d$column==column
+      left = d$row==row & d$column==column-1
+      right = d$row==row & d$column==column+1
+      #print("row:")
+      #print(row)
+      #print("column:")
+      #print(column)
+      #print("interpolands:")
+      d[i,]$interpolated_entropy = mean(
+        c(d[above,]$entropy,
+        d[below,]$entropy,
+        d[left,]$entropy,
+        d[right,]$entropy),
+        na.rm=T
+      )
+    }
+  }
+  d$interpolated_entropy
+}
+
+
+
+if (INTERPOLATE_ENTROPY) { # optional because it's slow
+  
+  NUM_ROWS = 9
+  NUM_COLS = 20
+
+  rows = c()
+  for(i in 1:NUM_ROWS) {
+    rows = c(rows, rep(LETTERS[i], NUM_COLS))
+  }
+  columns = rep(1:NUM_COLS, NUM_ROWS)
+  
+  grid_locations = data.frame(rows, columns)
+  names(grid_locations) = c("row", "column")
+  grid_locations = grid_locations %>% unite(OurCode, row, column, sep="")
+  
+## Interpolate to the full WCS grid
+All_ChipEntropies_Interpolated = grid_locations %>%
+  full_join(All_ChipEntropies, by="OurCode") %>%
+  filter(!(WCSCode %in% c("A0", "J0"))) %>% # white and black will not participate in the interpolation
+  mutate(RowColumn=CodeToRowColumn(OurCode)) %>%
+  separate(RowColumn, c("row", "column"), sep="_") %>%
+  mutate(row=as.numeric(row), column=as.numeric(column)) %>%
+  gather(Language, Entropy, -OurCode, -WCSCode, -row, -column) %>%
+  group_by(Language) %>%
+    mutate(InterpolatedEntropy=interpolate_entropy(as.numeric(Entropy), row, column)) %>%
+    ungroup() %>%
+  select(-Entropy, -row, -column) %>%
+  spread(Language, InterpolatedEntropy) %>%
+  select(-MunsellCode) %>%
+  bind_rows(filter(All_ChipEntropies, WCSCode %in% c("A0", "J0")) %>% select(-MunsellCode)) %>%
+  full_join(select(ConversionChart, BoliviaCode, MainCode) %>% rename(OurCode=BoliviaCode)) %>%
+  rename(MunsellCode=MainCode)
+
+write.csv(All_ChipEntropies_Interpolated, "output/All_ChipEntropies_Interpolated.csv")
+
+}
+
+
+
+
+
 
 
 # Numbers of subjects -----------------------------------------------
@@ -686,11 +804,11 @@ m %>%
 
 # Plot Heatmap ----------------------------------------
 
-LETTERS = c("A", "B", "C", "D", "E", "F", "G", "H")
+LETTERS = c("A", "B", "C", "D", "E", "F", "G", "H", "I", "J")
 
 load("cc.rda") # Load the chip code -> hex code conversion table
-
-
+cc["I1"] = "#000000"
+cc["I2"] = "#F5F5F5"
 
 ts_color_indices = focal_locations[focal_locations$Language == "Tsimane",]$term %>% as.numeric()
 ts_colors = TSIMANE_COLORS[ts_color_indices]
@@ -879,7 +997,7 @@ d_ci %>%
 	     )) +
     geom_errorbar(aes(ymin=lower, ymax=upper), color="light grey", size=.3) +
     geom_rect() +
-    geom_text(position=position_nudge(y=1/7), size=5) +
+    geom_text(position=position_nudge(y=1/7), size=5, color="black") +
     blanky +
     scale_color_manual(values=cc, guide=F) +
     scale_fill_manual(values=cc, guide=F) +
@@ -1122,7 +1240,9 @@ emp.foc$term = as.character(emp.foc$term)
       separate(Experiment, into=c("Language", "Task"), sep="_") %>%
       mutate(RowColumn=CodeToRowColumn(grid_location)) %>%
       separate(RowColumn, into=c("Row", "Column"), sep="_") %>%
+      filter(Row != "I") %>% # black and white are useless for this part so drop them
       mutate(Row=as.numeric(Row), Column=as.numeric(Column)) 
+    
 
     x.sum <- group_by(x, grid_location, Language, Task, Row, Column) %>%
       mutate(location.n = n()) %>%
@@ -1144,6 +1264,8 @@ emp.foc$term = as.character(emp.foc$term)
         x.sum[i,]$mode.hex = as.character(emp.foc[emp.foc$Language == lang & emp.foc$term == term,]$Hex)
       } else {
         loc = get_mode(filter(ColorData,
+                        
+                              !(grid_location %in% c("I1", "I2")),
 	                      Experiment == paste(lang, "Open", sep="_"),
 			      color == term)$grid_location)
         x.sum[i,]$mode.hex = as.character(ccd[ccd$grid_location == loc,]$Hex)
@@ -1229,8 +1351,8 @@ e = ColorData %>%
   
 e.ent = e %>%
   group_by(Language, Task, grid_location, color, subject) %>% 
-  summarise(p.loc.given.color = first(n/color.n), 
-            p.color.given.loc = first(n/location.n),
+  summarise(p.loc.given.color = unique(n/color.n), 
+            p.color.given.loc = unique(n/location.n),
             inside = #p.color.given.loc * 
             log2(1/p.loc.given.color))
   
@@ -1247,7 +1369,7 @@ e.ent = e %>%
     mutate(Subject=as.character(Subject)) %>%
     inner_join(ts_demo)
     
-  ggplot(tsimane, aes(y=e, x= Spanish)) +
+  ggplot(tsimane, aes(y=e, x=Spanish)) +
     geom_point() +
     geom_smooth(method='lm') +
     theme_bw() +
@@ -2391,12 +2513,6 @@ WCS_diversity_full %>%
 	 more=ratio>max(open_ratios),
 	 significant=less | more) %>%
   select(Experiment, ratio, significant) 
-
-
-
-
-
-
 
 
 # WCS Uncertainty Plots -------------------------------
