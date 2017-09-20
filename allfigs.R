@@ -15,10 +15,6 @@ library(Hmisc)
 library(lme4)
 library(tidyverse)
 
-# todo analysis using only the modal term for each chip
-# spearman correlatios of average surprisal across en es ts
-# education correlations
-
 Mode <- function(x) {
   ux <- unique(x)
   ux[which.max(tabulate(match(x, ux)))]
