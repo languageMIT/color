@@ -13,6 +13,7 @@ library(stringr)
 library(hexbin)
 library(Hmisc)
 library(lme4)
+library(tidyverse)
 
 # todo analysis using only the modal term for each chip
 # spearman correlatios of average surprisal across en es ts
@@ -41,8 +42,8 @@ FORBIDDEN_COLS = c(7, 9, 11, 13, 15)
 RESTRICT_FOCAL = F
 PRIOR = "Uniform" # "Uniform", "Foreground", "Background", ...
 RESTRICT_CIELAB = F
-BLACK_WHITE = T
-INTERPOLATE_ENTROPY = T
+BLACK_WHITE = F
+INTERPOLATE_ENTROPY = F
 
 get_mode <- function(x) {
   ux <- unique(x)
@@ -382,7 +383,8 @@ if (PRIOR == "Uniform") {
 
 # Get the joint distribution of words and chips
 
-ComputeConditionalEntropy = function(ColorData) {
+ComputeConditionalEntropy_Old = function(ColorData) {
+    # Old function which I keep around as a reference
 
 P_WordGivenChip = ColorData %>%
   group_by(Experiment, grid_location, color) %>%
@@ -395,6 +397,11 @@ P_WordGivenChip = ColorData %>%
   select(Experiment, grid_location, color, Probability, Frequency) %>%
   unique()
 
+if (PRIOR == "Uniform") {    
+  in_grid = ColorData %>% select(grid_location) %>% distinct()
+  prior = in_grid %>% mutate(Prior=1/n())
+  }
+    
   P_ChipGivenWord = P_WordGivenChip %>%  # we have p(w|c) for each w and c
     rename(Likelihood=Frequency) %>%     # use Frequency rather than Probability to increase precision
     inner_join(prior) %>%                # now we merge in p(c)
@@ -408,6 +415,7 @@ P_WordGivenChip = ColorData %>%
 
 # If uniform prior, do it this way to check
 if (PRIOR == "Uniform") {
+
   P_ChipGivenWord_Direct = ColorData %>%
     group_by(Experiment, grid_location, color) %>%
       summarise(Frequency=n()) %>%
@@ -417,14 +425,14 @@ if (PRIOR == "Uniform") {
       ungroup() %>%
     mutate(Probability=Frequency/Z) %>%
     select(Experiment, grid_location, color, Probability) %>%
-    unique()
+    distinct()
 
   assert(is_close(P_ChipGivenWord_Direct$Probability, P_ChipGivenWord$Probability))
 }
 
 # Get each chip's score
 GetChipScore<-function(x){
-  # Sum over all words.
+  # Sum over all words. This is very slow, so I rewrote this function below using dplyr stuff.
   Val=0
   for (CurrCol in unique(x$color)){
     ChipWord=filter(P_ChipGivenWord,
@@ -447,7 +455,68 @@ ChipEntropies <- ChipEntropies %>% inner_join(prior)
 ChipEntropies
 }
 
+ComputeConditionalEntropy = function(ColorData) {
+
+P_WordGivenChip = ColorData %>%
+  group_by(Experiment, grid_location, color) %>%
+    summarise(Frequency=n()) %>%
+    ungroup() %>%
+  group_by(Experiment, grid_location) %>%
+    mutate(Z=sum(Frequency)) %>%
+    ungroup() %>%
+  mutate(Probability=Frequency/Z) %>%
+  select(Experiment, grid_location, color, Probability, Frequency) %>%
+  unique()
+
+if (PRIOR == "Uniform") {    
+  in_grid = ColorData %>% select(grid_location) %>% distinct()
+  prior = in_grid %>% mutate(Prior=1/n())
+  }
+    
+  P_ChipGivenWord = P_WordGivenChip %>%  # we have p(w|c) for each w and c
+    rename(Likelihood=Frequency) %>%     # use Frequency rather than Probability to increase precision
+    inner_join(prior) %>%                # now we merge in p(c)
+    mutate(Pstar=Likelihood*Prior) %>%   # calculate p(c)p(w|c), which is prop. to p(w, c)
+    group_by(Experiment, color) %>%                  
+      mutate(Z=sum(Pstar)) %>%           # now calculate p(w) = \sum_c p(w, c)
+      ungroup() %>%        
+    mutate(Probability=Pstar/Z) %>%      # p(c|w) = p(c)p(w|c) / p(w)
+    select(Experiment, grid_location, color, Probability)
+
+
+# If uniform prior, do it this way to check
+if (PRIOR == "Uniform") {
+
+  P_ChipGivenWord_Direct = ColorData %>%
+    group_by(Experiment, grid_location, color) %>%
+      summarise(Frequency=n()) %>%
+      ungroup() %>%
+    group_by(Experiment, color) %>%
+      mutate(Z=sum(Frequency)) %>%
+      ungroup() %>%
+    mutate(Probability=Frequency/Z) %>%
+    select(Experiment, grid_location, color, Probability) %>%
+    distinct()
+
+  assert(is_close(P_ChipGivenWord_Direct$Probability, P_ChipGivenWord$Probability))
+}
+
+    ChipEntropies = P_WordGivenChip %>%
+        select(Experiment, grid_location, color, Probability) %>%
+        rename(P_WordGivenChip=Probability) %>%
+        inner_join(P_ChipGivenWord) %>%
+        rename(P_ChipGivenWord=Probability) %>%
+        group_by(Experiment, grid_location) %>%
+          summarise(Entropy=sum(P_WordGivenChip * log2(1/P_ChipGivenWord))) %>%
+          ungroup()
+
+    ChipEntropies %>% inner_join(prior)
+        
+}
+
+ChipEntropiesOld = ComputeConditionalEntropy_Old(ColorData)
 ChipEntropies = ComputeConditionalEntropy(ColorData)
+assert(all(is_close(ChipEntropiesOld$Entropy, ChipEntropies$Entropy)))
 
 LanguageEntropies <- ChipEntropies %>%
   group_by(Experiment) %>%
@@ -588,9 +657,29 @@ ConversionChart$WCSCode<-as.character(ConversionChart$WCSCode)
 ConversionChart <- filter(ConversionChart,BoliviaCode %in% unique(ColorData$grid_location)) %>%
   dplyr::rename(grid_location=WCSCode)
 
+WCS_unfiltered = WCS
 WCS <- filter(WCS,grid_location %in% unique(ConversionChart$grid_location))
-answers_bak = answers
 answers <- filter(answers, FielConcat %in% unique(ConversionChart$grid_location))
+
+print("Computing full WCS conditional entropy (may be slow)...")
+FullWCSChipEntropies = WCS_unfiltered %>%
+    ComputeConditionalEntropy()
+print("Done")
+
+wcs_to_srgb_d = read.csv("sRGB_Munsell320.csv") %>%
+    select(R, G, B, Row, Column) %>%
+    mutate(hex=rgb(R, G, B, maxColorValue=255)) %>%
+    unite(Code, Row, Column, sep="")
+
+wcs_to_srgb = wcs_to_srgb_d$hex
+wcs_to_srgb = setNames(wcs_to_srgb, wcs_to_srgb_d$Code)
+
+FullWCSChipEntropies %>%
+    select(-Prior) %>%
+    spread(Experiment, Entropy) %>%
+    inner_join(wcs_to_srgb_d %>% rename(grid_location=Code)) %>%
+    write.csv("output/Full_WCS_ChipEntropies.csv")
+           
 
 assert(length(unique(WCS$grid_location)) == 80 | RESTRICT_COOL | RESTRICT_FOCAL| RESTRICT_CIELAB | BLACK_WHITE)
 
@@ -649,7 +738,9 @@ if (RESTRICT_CIELAB) {
 # Compute WCS conditional entropy --------------------------
 
 WCS = filter(WCS, !is.na(Experiment))
+print("Computing WCS chip entropies...")
 WCS_ChipEntropies = ComputeConditionalEntropy(WCS)
+print("Done")
 
 write.csv(WCS_ChipEntropies, "output/Latest_WCS_ChipEntropies.csv")
 
@@ -666,7 +757,7 @@ All_ChipEntropies = ChipEntropies %>%
 All_ChipEntropies %>%
   write.csv("output/Latest_All_ChipEntropies.csv")
 
-tap = function(x){
+tap = function(x) {
   print(x)
   return(x)
 }
@@ -966,6 +1057,15 @@ for (lang in unique(d$Language)) {
                                                      ties.method=c("random"))
 }
 
+full_wcs = FullWCSChipEntropies %>%
+    rename(Language=Experiment) %>%
+    select(Language, grid_location, Entropy)
+
+full_wcs$score_rank = NA
+for (lang in unique(full_wcs$Language)) {
+    full_wcs[full_wcs$Language == lang,]$score_rank = rank(full_wcs[full_wcs$Language == lang,]$Entropy, ties.method=c("random"))
+}
+
 d_ci = ChipEntropiesWithCI %>%
     filter(Type == "Open") %>%
     select(-Row, -Column, Prior) %>%
@@ -1151,6 +1251,37 @@ d_to_plot %>%
 
 ggsave("output/WCS_tapestry.pdf", width=7, height=8)
 
+full_wcs_to_plot = full_wcs %>%
+    mutate(Language=factor(Language)) %>%
+    group_by(Language) %>%
+        mutate(lang_score=sum(Entropy), min_score=min(Entropy), max_score=max(Entropy)) %>%
+        ungroup() %>%
+    mutate(Language=reorder(factor(Language), -lang_score))
+
+wcs_to_srgb_d = read.csv("sRGB_Munsell320.csv") %>%
+    mutate(hex=rgb(R, G, B, maxColorValue=255)) %>%
+    unite(Code, Row, Column, sep="")
+
+wcs_to_srgb = wcs_to_srgb_d$hex
+wcs_to_srgb = setNames(wcs_to_srgb, wcs_to_srgb_d$Code)
+
+full_wcs_to_plot %>%
+  ggplot(aes(x=score_rank, y=Language, color=grid_location, fill=grid_location)) +
+  scale_color_manual(values=wcs_to_srgb, guide=F) +
+  scale_fill_manual(values=wcs_to_srgb, guide=F) +
+  geom_tile() +
+  xlab("Chips by increasing average surprisal =>") +
+  ylab("<= Languages by increasing total surprisal") +
+  theme_classic() +
+  theme(axis.ticks=element_blank(),
+        axis.text.x=element_blank(),
+	axis.text.y = element_text(size=6))
+
+ggsave("output/Full_WCS_tapestry.pdf", width=10, height=8)
+
+
+
+
 
 # Tornado plots ----------------------------------------
 
@@ -1198,6 +1329,21 @@ only_scores %>%
 	                 "blue", "black")))
 
 ggsave("output/WCS_simple_tornado.pdf", height=8.5, width=7)
+
+d_open %>%
+    filter(Language %in% c("English", "Spanish", "Tsimane")) %>%
+    ggplot(aes(x=score_rank, y=Language, color=Code, fill=Code)) +
+      scale_color_manual(values=cc, guide=F) +
+      scale_fill_manual(values=cc, guide=F) +
+      geom_tile() +
+      theme_bw() +
+      theme(axis.text.x = element_blank(),
+	    axis.ticks.x = element_blank()) +
+      ylab("") +
+    xlab("Colors by increasing average surprisal =>")
+
+ggsave("output/WCS_strip_est.pdf", width=30, height=3)
+    
 
 d_open %>%
   group_by(score_rank) %>%
@@ -2559,7 +2705,7 @@ GeneratePlot<-function(data, method){
     scale_x_continuous("")+
     scale_y_continuous("",limit=c(3.5,6),breaks=c(3.5,4,4.5,5,5.5,6))+
     theme(panel.border = element_blank(),axis.line = element_line(colour="black"),
-          panel.grid.major = element_blank(),panel.grid.minor = element_blank())   
+          panel.grid.major = element_blank(),panel.grid.minor = element_blank())
 }
 
 LangEntropies %>%
