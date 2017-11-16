@@ -560,7 +560,6 @@ for (i in 1:num_bootstrap_samples) {
     } else {
         ResampledChipEntropies = rbind(ResampledChipEntropies, new_entropies)
     }
-    ResampledChipEntropies %>% separate(Experiment, into=c("Language", "Type"), sep="_")
 }
 
 ResampledChipEntropies %>%
